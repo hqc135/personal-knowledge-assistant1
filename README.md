@@ -30,7 +30,12 @@
 
 ```
 personal-knowledge-assistant/
-├── notes/                  # Markdown 笔记（数据源）
+├── notes/                  # Markdown 笔记（5 篇示例）
+├── tests/                  # 单元测试 (pytest)
+│   ├── test_data_pipeline.py
+│   ├── test_retriever.py
+│   ├── test_metrics.py
+│   └── test_embedder.py
 ├── config.py               # 集中配置管理（从 .env 加载）
 ├── logger.py               # 统一日志配置
 ├── metrics.py              # 可观测性（计时 + 指标收集）
@@ -41,8 +46,7 @@ personal-knowledge-assistant/
 ├── evaluator.py            # 评估（Embedding + LLM-as-Judge）
 ├── ablation.py             # 消融实验脚本
 ├── app.py                  # Gradio 应用（聊天 + 仪表盘）
-├── eval_cases.json         # 评估测试用例
-├── requirements.txt        # Python 依赖
+├── Dockerfile              # Docker 一键部署
 ├── .env.example            # 环境变量模板
 └── README.md
 ```
@@ -72,7 +76,20 @@ python data_pipeline.py   # 构建/增量更新索引
 python app.py              # 启动应用 → http://localhost:7860
 ```
 
-## 🧪 消融实验
+## 🧪 测试
+
+```bash
+pytest -v
+```
+
+## 🐳 Docker 部署
+
+```bash
+docker build -t knowledge-assistant .
+docker run -p 7860:7860 --env-file .env knowledge-assistant
+```
+
+## 📊 消融实验
 
 对比 5 种检索策略，使用 Embedding 相似度 + LLM-as-Judge 三维度评估：
 
