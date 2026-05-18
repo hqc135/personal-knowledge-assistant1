@@ -6,8 +6,9 @@
 
 - 🔍 **语义检索** — 使用智谱 embedding-3 API 进行向量化检索
 - 🎯 **二阶段重排序** — 使用 CrossEncoder Reranker 提升检索精度
-- 🤖 **智能生成** — 基于 DeepSeek LLM（兼容 OpenAI 接口）生成回答
+- 🤖 **流式生成** — 基于 DeepSeek LLM，逐 token 实时输出
 - 💾 **本地向量库** — ChromaDB 持久化存储，无需外部数据库服务
+- ⚡ **增量索引** — 基于文件 hash，只重新处理变更/新增的笔记
 - 📊 **评估框架** — 内置检索相关性和回答忠实度评估
 - 🖥️ **Gradio 界面** — 开箱即用的聊天界面
 
@@ -34,10 +35,11 @@ personal-knowledge-assistant/
 │   ├── system-design.md
 │   └── ...
 ├── config.py               # 集中配置管理（从 .env 加载）
+├── logger.py               # 统一日志配置
 ├── embedder.py             # 统一 Embedding 模块（智谱 API）
-├── data_popeline.py        # 数据处理 + Embedding + 写入向量库
+├── data_pipeline.py        # 数据处理 + 增量索引
 ├── retriever.py            # 向量检索 + Rerank 二阶段排序
-├── generator.py            # LLM 回答生成（DeepSeek API）
+├── generator.py            # LLM 回答生成（支持流式输出）
 ├── evaluator.py            # 评估框架（相关性 + 忠实度）
 ├── app.py                  # Gradio 聊天界面入口
 ├── eval_cases.json         # 评估测试用例
@@ -97,10 +99,10 @@ DEEPSEEK_API_KEY=your-deepseek-key-here
 ### 4. 构建知识库索引
 
 ```bash
-python data_popeline.py
+python data_pipeline.py
 ```
 
-这将读取 `notes/` 下所有 `.md` 文件，分割文本，生成 Embedding 并存入 ChromaDB。
+首次运行会索引所有文件；后续运行自动增量索引（只处理新增/变更的文件）。
 
 ### 5. 启动应用
 
@@ -148,8 +150,9 @@ print(f"回答忠实度: {results['grounded_rate']:.1%}")
 - **Chunk Size = 512, Overlap = 64**: 平衡上下文完整性和检索精度
 - **两阶段检索**: 先向量召回 top-5，再 Rerank 取 top-3，提升精准度
 - **API Embedding**: 使用智谱 embedding-3 API（1024 维），避免本地 GPU 依赖
-- **本地优先**: 向量数据存储在本地 ChromaDB，无需外部数据库
-- **幂等索引**: 使用 ChromaDB 的 `upsert` 操作，重复索引不会产生重复数据
+- **增量索引**: 基于文件 MD5 hash，避免重复处理未变更文件，节省 API 额度
+- **流式输出**: 逐 token 返回，减少用户等待感
+- **幂等写入**: 使用 ChromaDB 的 `upsert` 操作，重复索引不会产生重复数据
 
 ## 📄 License
 
