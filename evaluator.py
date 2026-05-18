@@ -1,13 +1,13 @@
 """
 简单评估框架：不依赖 GPT-4 打分，用规则 + embedding 相似度
 """
-from sentence_transformers import SentenceTransformer
 import numpy as np
 import json
+from embedder import ZhipuEmbedder
 
 class SimpleEvaluator:
     def __init__(self):
-        self.embedder = SentenceTransformer("BAAI/bge-small-zh-v1.5")
+        self.embedder = ZhipuEmbedder()
 
     def relevance_score(self, query: str, retrieved_texts: list[str]) -> float:
         """检索相关性：query 与 retrieved chunks 的平均余弦相似度"""

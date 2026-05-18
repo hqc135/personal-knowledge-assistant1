@@ -2,11 +2,11 @@ import os
 from pathlib import Path
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import chromadb
-from sentence_transformers import SentenceTransformer
+from embedder import ZhipuEmbedder
 
 class DocumentProcessor:
     def __init__(self, collection_name="my_knowledge_base"):
-        self.embedder = SentenceTransformer("BAAI/bge-small-zh-v1.5")
+        self.embedder = ZhipuEmbedder()
         self.client = chromadb.PersistentClient(path="./chroma_db")
         self.collection = self.client.get_or_create_collection(
             name=collection_name,

@@ -1,9 +1,10 @@
-from sentence_transformers import SentenceTransformer, CrossEncoder
+from sentence_transformers import CrossEncoder
 import chromadb
+from embedder import ZhipuEmbedder
 
 class Retriever:
     def __init__(self, collection_name="my_knowledge_base", use_reranker=True):
-        self.embedder = SentenceTransformer("BAAI/bge-small-zh-v1.5")
+        self.embedder = ZhipuEmbedder()
         self.client = chromadb.PersistentClient(path="./chroma_db")
         self.collection = self.client.get_collection(collection_name)
         
