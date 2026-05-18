@@ -1,13 +1,13 @@
 from openai import OpenAI
+import config
 
 class Generator:
     def __init__(self):
-        # DeepSeek 兼容 OpenAI 接口
         self.client = OpenAI(
-            api_key="your-deepseek-key",  # 免费额度
-            base_url="https://api.deepseek.com"
+            api_key=config.DEEPSEEK_API_KEY,
+            base_url=config.LLM_BASE_URL,
         )
-        self.model = "deepseek-chat"
+        self.model = config.LLM_MODEL
 
     def generate(self, query: str, contexts: list[dict]) -> str:
         context_text = "\n\n---\n\n".join(
@@ -33,7 +33,7 @@ class Generator:
         response = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
-            temperature=0.3,
-            max_tokens=1024
+            temperature=config.LLM_TEMPERATURE,
+            max_tokens=config.LLM_MAX_TOKENS,
         )
         return response.choices[0].message.content

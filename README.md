@@ -33,6 +33,7 @@ personal-knowledge-assistant/
 │   ├── rag-notes.md
 │   ├── system-design.md
 │   └── ...
+├── config.py               # 集中配置管理（从 .env 加载）
 ├── embedder.py             # 统一 Embedding 模块（智谱 API）
 ├── data_popeline.py        # 数据处理 + Embedding + 写入向量库
 ├── retriever.py            # 向量检索 + Rerank 二阶段排序
@@ -41,6 +42,7 @@ personal-knowledge-assistant/
 ├── app.py                  # Gradio 聊天界面入口
 ├── eval_cases.json         # 评估测试用例
 ├── requirements.txt        # Python 依赖
+├── .env.example            # 环境变量模板
 ├── .gitignore              # Git 忽略规则
 └── README.md               # 项目说明文档
 ```
@@ -65,19 +67,28 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. 配置 API Key
-
-配置以下环境变量（推荐写入 `.env` 或系统环境变量）：
+复制 `.env.example` 为 `.env`，填入你的 API Key：
 
 ```bash
-# 智谱 AI（Embedding）
-export ZHIPUAI_API_KEY=your-zhipuai-key
-
-# DeepSeek（LLM 生成）
-export DEEPSEEK_API_KEY=your-deepseek-key
+cp .env.example .env
 ```
 
-或直接编辑 `embedder.py` 和 `generator.py` 中的 API Key。
+编辑 `.env` 文件，填入必需的 API Key：
+
+```dotenv
+# 必填
+ZHIPUAI_API_KEY=your-zhipuai-key-here
+DEEPSEEK_API_KEY=your-deepseek-key-here
+
+# 可选（有默认值，按需修改）
+# EMBEDDING_MODEL=embedding-3
+# LLM_MODEL=deepseek-chat
+# CHUNK_SIZE=512
+```
+
+> ⚠️ `.env` 文件已被 `.gitignore` 排除，不会提交到 Git，你的 Key 是安全的。
+>
+> 💡 所有可配置项见 `.env.example`，运行时由 `config.py` 统一加载。
 
 ### 3. 添加笔记
 

@@ -12,6 +12,8 @@ build/
 venv/
 .venv/
 env/
+
+# Environment secrets (keep .env.example)
 .env
 
 # ChromaDB local storage

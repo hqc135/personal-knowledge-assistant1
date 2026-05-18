@@ -2,7 +2,7 @@ import gradio as gr
 from retriever import Retriever
 from generator import Generator
 
-retriever = Retriever(use_reranker=True)
+retriever = Retriever()
 generator = Generator()
 
 def chat(query: str, history: list):

@@ -1,23 +1,27 @@
 from sentence_transformers import CrossEncoder
 import chromadb
 from embedder import ZhipuEmbedder
+import config
 
 class Retriever:
-    def __init__(self, collection_name="my_knowledge_base", use_reranker=True):
+    def __init__(self):
         self.embedder = ZhipuEmbedder()
-        self.client = chromadb.PersistentClient(path="./chroma_db")
-        self.collection = self.client.get_collection(collection_name)
+        self.client = chromadb.PersistentClient(path=config.CHROMA_DB_PATH)
+        self.collection = self.client.get_collection(config.COLLECTION_NAME)
         
-        self.use_reranker = use_reranker
-        if use_reranker:
+        self.use_reranker = config.USE_RERANKER
+        if self.use_reranker:
             # 轻量 reranker，CPU 可跑
             self.reranker = CrossEncoder(
-                "BAAI/bge-reranker-v2-m3", 
+                config.RERANKER_MODEL, 
                 max_length=512
             )
 
-    def retrieve(self, query: str, top_k: int = 5, final_k: int = 3) -> list:
+    def retrieve(self, query: str, top_k: int = None, final_k: int = None) -> list:
         """向量检索 + rerank"""
+        top_k = top_k or config.RETRIEVER_TOP_K
+        final_k = final_k or config.RETRIEVER_FINAL_K
+
         query_embedding = self.embedder.encode(
             query, normalize_embeddings=True
         ).tolist()

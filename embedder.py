@@ -1,17 +1,16 @@
 """
 统一 Embedding 模块：调用智谱 embedding-3 API
 """
-import os
 import numpy as np
 from zhipuai import ZhipuAI
+import config
 
 
 class ZhipuEmbedder:
-    def __init__(self, model: str = "embedding-3", dimensions: int = 1024):
-        api_key = os.getenv("ZHIPUAI_API_KEY", "your-zhipuai-key")
-        self.client = ZhipuAI(api_key=api_key)
-        self.model = model
-        self.dimensions = dimensions
+    def __init__(self):
+        self.client = ZhipuAI(api_key=config.ZHIPUAI_API_KEY)
+        self.model = config.EMBEDDING_MODEL
+        self.dimensions = config.EMBEDDING_DIMENSIONS
 
     def encode(self, texts, normalize_embeddings: bool = True, **kwargs) -> np.ndarray:
         """

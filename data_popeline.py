@@ -3,18 +3,19 @@ from pathlib import Path
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import chromadb
 from embedder import ZhipuEmbedder
+import config
 
 class DocumentProcessor:
-    def __init__(self, collection_name="my_knowledge_base"):
+    def __init__(self):
         self.embedder = ZhipuEmbedder()
-        self.client = chromadb.PersistentClient(path="./chroma_db")
+        self.client = chromadb.PersistentClient(path=config.CHROMA_DB_PATH)
         self.collection = self.client.get_or_create_collection(
-            name=collection_name,
+            name=config.COLLECTION_NAME,
             metadata={"hf_space": "personal_kb"}
         )
         self.splitter = RecursiveCharacterTextSplitter(
-            chunk_size=512,
-            chunk_overlap=64,
+            chunk_size=config.CHUNK_SIZE,
+            chunk_overlap=config.CHUNK_OVERLAP,
             separators=["\n## ", "\n### ", "\n\n", "\n", "。", ""]
         )
 
@@ -44,7 +45,6 @@ class DocumentProcessor:
         embeddings = self.embedder.encode(
             texts, 
             normalize_embeddings=True,
-            show_progress_bar=True
         ).tolist()
 
         # ChromaDB 支持 upsert，幂等写入
@@ -59,5 +59,5 @@ class DocumentProcessor:
 
 if __name__ == "__main__":
     processor = DocumentProcessor()
-    docs = processor.load_markdown_dir("./notes")
+    docs = processor.load_markdown_dir(config.NOTES_DIR)
     processor.index(docs)
