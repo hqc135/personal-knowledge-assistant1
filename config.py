@@ -48,3 +48,11 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "64"))
 CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_db")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "my_knowledge_base")
 NOTES_DIR = os.getenv("NOTES_DIR", "./notes")
+
+# ── 混合检索 配置 ─────────────────────────────────────────
+USE_HYBRID_SEARCH = os.getenv("USE_HYBRID_SEARCH", "true").lower() == "true"
+RRF_K = int(os.getenv("RRF_K", "60"))
+
+# ── 可观测性 配置 ─────────────────────────────────────────
+METRICS_MAX_HISTORY = int(os.getenv("METRICS_MAX_HISTORY", "200"))
+
