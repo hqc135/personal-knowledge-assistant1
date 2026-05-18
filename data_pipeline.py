@@ -61,21 +61,21 @@ class DocumentProcessor:
             encoding="utf-8",
         )
 
-    def load_markdown_dir(self, dir_path: str, incremental: bool = True):
+    def load_markdown_dir(self, dir_path: str, incremental: bool = True) -> list[dict]:
         """
         递归加载目录下所有 markdown 文件。
         incremental=True 时只处理新增/变更的文件。
         """
-        dir_path = Path(dir_path)
-        all_files = list(dir_path.rglob("*.md"))
+        dir_path_obj = Path(dir_path)
+        all_files = list(dir_path_obj.rglob("*.md"))
         index_meta = self._load_index_meta() if incremental else {}
 
         docs = []
-        updated_meta = {}
+        updated_meta: dict[str, str] = {}
         skipped = 0
 
         for path in all_files:
-            relative = path.relative_to(dir_path)
+            relative = path.relative_to(dir_path_obj)
             file_key = str(relative)
             current_hash = self._file_hash(path)
             updated_meta[file_key] = current_hash

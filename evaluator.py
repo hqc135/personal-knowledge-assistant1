@@ -12,6 +12,7 @@ from openai import OpenAI
 
 from embedder import ZhipuEmbedder
 import config
+from typing import Optional, Any
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +103,7 @@ def run_eval(
     retriever,
     generator,
     retrieve_mode: str = "auto",
-    use_rerank: bool = None,
+    use_rerank: Optional[bool] = None,
     use_llm_judge: bool = True,
 ) -> dict:
     """
@@ -154,7 +155,7 @@ def run_eval(
 
     # ── 汇总 ──
     valid = [r for r in results if "error" not in r]
-    summary = {
+    summary: dict[str, Any] = {
         "retrieve_mode": retrieve_mode,
         "use_rerank": use_rerank,
         "num_cases": len(test_cases),

@@ -31,15 +31,14 @@ class ZhipuEmbedder:
           - 输入 list → 返回 shape (N, dim) 的 2D 数组
         """
         single_input = isinstance(texts, str)
-        if single_input:
-            texts = [texts]
+        text_list: list[str] = [texts] if isinstance(texts, str) else texts
 
         # 智谱 API 单次最多支持 64 条，需分批
         batch_size = 64
         all_embeddings = []
 
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i : i + batch_size]
+        for i in range(0, len(text_list), batch_size):
+            batch = text_list[i : i + batch_size]
             batch_embeddings = self._call_api_with_retry(batch)
             all_embeddings.extend(batch_embeddings)
 
@@ -78,3 +77,4 @@ class ZhipuEmbedder:
                     attempt, wait, e,
                 )
                 time.sleep(wait)
+        return []

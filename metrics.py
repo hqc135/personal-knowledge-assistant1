@@ -5,7 +5,7 @@ import time
 import threading
 from dataclasses import dataclass, field
 from collections import deque
-from typing import Optional
+from typing import Optional, Any
 
 import numpy as np
 import config
@@ -43,7 +43,7 @@ class RequestMetrics:
 class MetricsCollector:
     """线程安全的指标收集器"""
 
-    def __init__(self, max_history: int = None):
+    def __init__(self, max_history: Optional[int] = None):
         max_history = max_history or config.METRICS_MAX_HISTORY
         self._history: deque[RequestMetrics] = deque(maxlen=max_history)
         self._lock = threading.Lock()

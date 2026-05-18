@@ -19,12 +19,18 @@ from logger import setup_logging
 from retriever import Retriever
 from generator import Generator
 from evaluator import run_eval
+from typing import TypedDict
 
 logger = logging.getLogger(__name__)
 
 # ── 实验配置 ──────────────────────────────────────────────
 
-EXPERIMENTS = [
+class Experiment(TypedDict):
+    name: str
+    mode: str
+    rerank: bool
+
+EXPERIMENTS: list[Experiment] = [
     {"name": "Vector Only",        "mode": "vector",  "rerank": False},
     {"name": "Vector + Reranker",  "mode": "vector",  "rerank": True},
     {"name": "BM25 Only",          "mode": "bm25",    "rerank": False},

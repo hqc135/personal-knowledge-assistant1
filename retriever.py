@@ -11,6 +11,7 @@ import chromadb
 from embedder import ZhipuEmbedder
 from metrics import Timer
 import config
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -123,9 +124,9 @@ class Retriever:
         self,
         query: str,
         mode: str = "auto",
-        use_rerank: bool = None,
-        top_k: int = None,
-        final_k: int = None,
+        use_rerank: Optional[bool] = None,
+        top_k: Optional[int] = None,
+        final_k: Optional[int] = None,
     ) -> list[dict]:
         """
         检索入口。
