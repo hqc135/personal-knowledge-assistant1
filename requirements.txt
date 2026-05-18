@@ -1,0 +1,18 @@
+# Web UI
+gradio>=4.0.0
+
+# LLM Client (OpenAI-compatible, used for DeepSeek)
+openai>=1.0.0
+
+# Vector Database
+chromadb>=0.4.0
+
+# Embedding & Reranker Models
+sentence-transformers>=2.2.0
+
+# Text Splitting
+langchain-text-splitters>=0.0.1
+langchain>=0.1.0
+
+# Scientific Computing
+numpy>=1.24.0

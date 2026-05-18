@@ -1,0 +1,14 @@
+[
+  {
+    "query": "总结一下我关于 RAG 的笔记",
+    "expected_keywords": ["RAG", "检索", "生成"]
+  },
+  {
+    "query": "我之前记录的面试准备要点有哪些",
+    "expected_keywords": ["面试", "准备"]
+  },
+  {
+    "query": "系统设计的关键原则是什么",
+    "expected_keywords": ["系统设计", "原则"]
+  }
+]
