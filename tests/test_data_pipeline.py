@@ -53,7 +53,7 @@ class TestLoadMarkdown:
         md_file.write_text("# Title\n\nSome content here.", encoding="utf-8")
 
         # 手动模拟 load 逻辑（不依赖完整 DocumentProcessor）
-        from langchain.text_splitter import RecursiveCharacterTextSplitter
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
 
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=512, chunk_overlap=64,

@@ -123,7 +123,7 @@ Hybrid + Reranker        0.7234     0.7890      4.3       4.3       4.3 ★
 | 融合排序 | RRF (Reciprocal Rank Fusion) | 多路检索结果融合 |
 | Reranker | `BAAI/bge-reranker-v2-m3` | 交叉编码器精排 |
 | Vector DB | ChromaDB | 本地持久化，零运维 |
-| LLM | DeepSeek Chat | OpenAI 兼容接口 |
+| LLM | deepseek-v4-flash | OpenAI 兼容接口 |
 | 评估 | LLM-as-Judge + Embedding | 三维度自动化评估 |
 | Frontend | Gradio (Blocks) | 聊天 + 可观测性仪表盘 |
 

@@ -26,12 +26,28 @@ logger = logging.getLogger(__name__)
 retriever = Retriever()
 generator = Generator()
 
+CHATBOT_USES_MESSAGES = True
+
+
+def create_chatbot():
+    global CHATBOT_USES_MESSAGES
+    try:
+        return gr.Chatbot(label="对话", height=480, type="messages")
+    except TypeError:
+        CHATBOT_USES_MESSAGES = True
+        return gr.Chatbot(label="对话", height=480)
+
 # ── 聊天逻辑 ─────────────────────────────────────────────
 
 
-def chat(message: str, history: list):
+def chat(message: str, history: list | None):
     """流式聊天 + 指标采集"""
     t_start = time.perf_counter()
+    history = history or []
+    if CHATBOT_USES_MESSAGES:
+        base_history = history + [{"role": "user", "content": message}]
+    else:
+        base_history = history
 
     # 检索
     try:
@@ -39,7 +55,10 @@ def chat(message: str, history: list):
             contexts = retriever.retrieve(message)
     except Exception as e:
         logger.error("检索失败: %s", e)
-        yield history + [[message, f"⚠️ 检索出错: {e}"]]
+        if CHATBOT_USES_MESSAGES:
+            yield base_history + [{"role": "assistant", "content": f"⚠️ 检索出错: {e}"}]
+        else:
+            yield base_history + [[message, f"⚠️ 检索出错: {e}"]]
         return
 
     # 来源信息
@@ -55,11 +74,17 @@ def chat(message: str, history: list):
         with Timer() as t_gen:
             for token in generator.generate_stream(message, contexts):
                 answer += token
-                yield history + [[message, answer + source_block]]
+                if CHATBOT_USES_MESSAGES:
+                    yield base_history + [{"role": "assistant", "content": answer + source_block}]
+                else:
+                    yield base_history + [[message, answer + source_block]]
     except Exception as e:
         logger.error("生成失败: %s", e)
         error_msg = answer + f"\n\n⚠️ 生成中断: {e}" if answer else f"⚠️ 生成出错: {e}"
-        yield history + [[message, error_msg + source_block]]
+        if CHATBOT_USES_MESSAGES:
+            yield base_history + [{"role": "assistant", "content": error_msg + source_block}]
+        else:
+            yield base_history + [[message, error_msg + source_block]]
         return
 
     # 记录指标
@@ -77,7 +102,10 @@ def chat(message: str, history: list):
         retrieve_mode=retriever.last_timing.get("mode", "unknown"),
     ))
 
-    yield history + [[message, answer + source_block]]
+    if CHATBOT_USES_MESSAGES:
+        yield base_history + [{"role": "assistant", "content": answer + source_block}]
+    else:
+        yield base_history + [[message, answer + source_block]]
 
 
 # ── 仪表盘逻辑 ───────────────────────────────────────────
@@ -186,12 +214,11 @@ def refresh_dashboard():
 
 with gr.Blocks(
     title="📚 个人知识库助手",
-    theme=gr.themes.Soft(),
 ) as demo:
     gr.Markdown("# 📚 个人知识库助手\n基于 RAG 混合检索 + 流式生成")
 
     with gr.Tab("💬 聊天"):
-        chatbot = gr.Chatbot(label="对话", height=480)
+        chatbot = create_chatbot()
         with gr.Row():
             msg = gr.Textbox(
                 label="输入问题",
@@ -232,4 +259,4 @@ with gr.Blocks(
 
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(theme=gr.themes.Soft())

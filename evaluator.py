@@ -6,6 +6,8 @@
 """
 import json
 import logging
+import re
+import time
 
 import numpy as np
 from openai import OpenAI
@@ -70,32 +72,51 @@ class LLMJudgeEvaluator:
             base_url=config.LLM_BASE_URL,
         )
 
+    @staticmethod
+    def _extract_json(text: str) -> dict:
+        """尽量从模型输出中提取 JSON 对象"""
+        content = text.strip()
+        if "```" in content:
+            parts = content.split("```")
+            if len(parts) >= 2:
+                content = parts[1].strip()
+                if content.startswith("json"):
+                    content = content[4:].strip()
+
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            match = re.search(r"\{[\s\S]*\}", content)
+            if match:
+                return json.loads(match.group(0))
+            raise
+
     def judge(self, query: str, contexts: list[str], answer: str) -> dict:
         ctx_text = "\n---\n".join(contexts)
         prompt = _JUDGE_PROMPT.format(query=query, contexts=ctx_text, answer=answer)
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                response = self.client.chat.completions.create(
+                    model=config.LLM_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.1,
+                    max_tokens=300,
+                )
+                content = response.choices[0].message.content or ""
+                return self._extract_json(content)
+            except Exception as e:
+                last_error = e
+                logger.warning("LLM Judge 解析失败 (第 %d/3 次): %s", attempt, e)
+                if attempt < 3:
+                    time.sleep(1.0 * attempt)
 
-        try:
-            response = self.client.chat.completions.create(
-                model=config.LLM_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=300,
-            )
-            content = response.choices[0].message.content.strip()
-            # 提取 JSON（兼容 markdown 代码块包裹）
-            if "```" in content:
-                content = content.split("```")[1]
-                if content.startswith("json"):
-                    content = content[4:]
-            return json.loads(content)
-        except Exception as e:
-            logger.error("LLM Judge 解析失败: %s", e)
-            return {
-                "retrieval_relevance": 0,
-                "faithfulness": 0,
-                "completeness": 0,
-                "reason": f"评估失败: {e}",
-            }
+        return {
+            "retrieval_relevance": 0,
+            "faithfulness": 0,
+            "completeness": 0,
+            "reason": f"评估失败: {last_error}",
+        }
 
 
 def run_eval(

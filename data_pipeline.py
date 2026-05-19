@@ -7,7 +7,8 @@ import json
 import logging
 from pathlib import Path
 
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 import chromadb
 from embedder import ZhipuEmbedder
 import config

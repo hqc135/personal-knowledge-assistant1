@@ -31,7 +31,7 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "embedding-3")
 EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "1024"))
 
 # ── LLM 配置 ─────────────────────────────────────────────
-LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
+LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v4-flash")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com")
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "1024"))
