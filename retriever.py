@@ -9,6 +9,7 @@ from sentence_transformers import CrossEncoder
 import chromadb
 
 from embedder import ZhipuEmbedder
+from kg_retriever import KGRetriever
 from metrics import Timer
 import config
 from typing import Optional
@@ -35,6 +36,11 @@ class Retriever:
         self.use_hybrid = config.USE_HYBRID_SEARCH
         if self.use_hybrid:
             self._build_bm25_index()
+
+        # KG 检索
+        self.use_kg = config.USE_KG_RETRIEVAL
+        if self.use_kg:
+            self.kg = KGRetriever()
 
         # 上次检索的分步耗时 (供可观测性使用)
         self.last_timing = {}
@@ -118,6 +124,35 @@ class Retriever:
         sorted_ids = sorted(rrf_scores, key=lambda x: rrf_scores[x], reverse=True)
         return [{**doc_map[did], "score": rrf_scores[did]} for did in sorted_ids]
 
+    def _kg_search(self, query: str, top_k: int) -> list[dict]:
+        if not self.use_kg:
+            return []
+
+        chunk_ids = self.kg.retrieve_chunk_ids(query, top_k=top_k)
+        if not chunk_ids:
+            return []
+
+        results = self.collection.get(ids=chunk_ids, include=["documents", "metadatas"])
+        output: list[dict] = []
+        for rank, (doc_id, doc, meta) in enumerate(
+            zip(results["ids"], results["documents"], results["metadatas"])
+        ):
+            if doc is None:
+                continue
+            score = config.KG_SCORE_BASE + (max(top_k - rank, 0) / max(top_k, 1)) * 0.1
+            output.append({"id": doc_id, "text": doc, "metadata": meta, "score": score})
+        return output
+
+    @staticmethod
+    def _merge_candidates(*result_lists: list[dict]) -> list[dict]:
+        merged: dict[str, dict] = {}
+        for results in result_lists:
+            for item in results:
+                doc_id = item["id"]
+                if doc_id not in merged or item["score"] > merged[doc_id]["score"]:
+                    merged[doc_id] = item
+        return sorted(merged.values(), key=lambda x: x["score"], reverse=True)
+
     # ── 主检索入口 ────────────────────────────────────────
 
     def retrieve(
@@ -156,6 +191,23 @@ class Retriever:
                 candidates = self._vector_search(query, top_k)
 
         self.last_timing["embed_ms"] = t_embed.elapsed_ms
+
+        if self.use_kg:
+            base_count = len(candidates)
+            with Timer() as t_kg:
+                kg_candidates = self._kg_search(query, config.KG_TOP_K)
+            self.last_timing["kg_ms"] = t_kg.elapsed_ms
+            if kg_candidates:
+                candidates = self._merge_candidates(candidates, kg_candidates)
+            merged_count = len(candidates)
+            hit_rate = len(kg_candidates) / max(merged_count, 1)
+            logger.info(
+                "KG hits=%d, base=%d, merged=%d, hit_rate=%.2f",
+                len(kg_candidates),
+                base_count,
+                merged_count,
+                hit_rate,
+            )
 
         logger.debug("检索模式=%s, 候选数=%d", mode, len(candidates))
 

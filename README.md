@@ -11,6 +11,7 @@
 - 🧪 **消融实验** — 对比 5 种检索策略，LLM-as-Judge 三维度打分
 - ⚡ **增量索引** — 基于文件 hash，跳过未变更文件
 - 💾 **本地向量库** — ChromaDB 持久化，零运维
+- 🧠 **知识图谱增强** — LLM 抽取三元组，NetworkX 图谱检索补召回
 
 ## 🏗️ 架构
 
@@ -19,10 +20,16 @@
 │   Markdown   │────▶│   Data       │────▶│   ChromaDB   │
 │   Notes      │     │   Pipeline   │     │   (Vector DB)│
 └──────────────┘     └──────────────┘     └──────┬───────┘
-                                                  │
+                     │                   │
+                     ▼                   │
+                ┌───────────┐            │
+                │ KG Store  │            │
+                │ (JSON)    │            │
+                └─────┬─────┘            │
+                    │                  │
 ┌──────────────┐     ┌──────────────┐     ┌──────▼───────┐
 │   Gradio     │◀────│   Generator  │◀────│   Retriever  │
-│   Chat + 📊  │     │   (DeepSeek) │     │Vector+BM25+RR│
+│   Chat + 📊  │     │   (DeepSeek) │     │Vector+BM25+KG│
 └──────────────┘     └──────────────┘     └──────────────┘
 ```
 
@@ -30,7 +37,7 @@
 
 ```
 personal-knowledge-assistant/
-├── notes/                  # Markdown 笔记（5 篇示例）
+├── notes/                  # Markdown 笔记（38 篇示例）
 ├── tests/                  # 单元测试 (pytest)
 │   ├── test_data_pipeline.py
 │   ├── test_retriever.py
@@ -43,11 +50,15 @@ personal-knowledge-assistant/
 ├── data_pipeline.py        # 数据处理 + 增量索引
 ├── retriever.py            # 混合检索（Vector + BM25 + RRF + Rerank）
 ├── generator.py            # LLM 生成（阻塞 + 流式）
+├── kg_extractor.py          # LLM 三元组抽取
+├── kg_store.py              # 本地 JSON 三元组存储
+├── kg_retriever.py          # KG 检索（NetworkX）
 ├── evaluator.py            # 评估（Embedding + LLM-as-Judge）
 ├── ablation.py             # 消融实验脚本
 ├── app.py                  # Gradio 应用（聊天 + 仪表盘）
 ├── Dockerfile              # Docker 一键部署
 ├── .env.example            # 环境变量模板
+├── kg_triples.json          # 知识图谱三元组（运行后生成）
 └── README.md
 ```
 
@@ -56,7 +67,7 @@ personal-knowledge-assistant/
 ### 1. 环境准备
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/hqc135/personal-knowledge-assistant1
 cd personal-knowledge-assistant
 python -m venv venv && venv\Scripts\activate  # Windows
 pip install -r requirements.txt
@@ -123,6 +134,7 @@ Hybrid + Reranker        0.7234     0.7890      4.3       4.3       4.3 ★
 | 融合排序 | RRF (Reciprocal Rank Fusion) | 多路检索结果融合 |
 | Reranker | `BAAI/bge-reranker-v2-m3` | 交叉编码器精排 |
 | Vector DB | ChromaDB | 本地持久化，零运维 |
+| Knowledge Graph | NetworkX + JSON | 图谱检索，补充结构化召回 |
 | LLM | deepseek-v4-flash | OpenAI 兼容接口 |
 | 评估 | LLM-as-Judge + Embedding | 三维度自动化评估 |
 | Frontend | Gradio (Blocks) | 聊天 + 可观测性仪表盘 |
@@ -135,6 +147,22 @@ Hybrid + Reranker        0.7234     0.7890      4.3       4.3       4.3 ★
 - **消融实验**: 对比 5 种策略组合，用数据支撑技术选型决策
 - **可观测性**: 全链路计时，各阶段延迟可视化，便于性能调优
 - **增量索引**: 文件 MD5 hash 追踪，避免重复 API 调用
+- **KG 增强**: 抽取三元组并存储为 JSON，检索时从图谱召回关联 chunk
+
+## ⚙️ KG 配置
+
+可在 `.env` 中配置以下参数：
+
+```
+USE_KG_EXTRACTION=true
+USE_KG_RETRIEVAL=true
+KG_TRIPLES_PATH=./kg_triples.json
+KG_TOP_K=5
+KG_SCORE_BASE=0.4
+KG_MAX_TRIPLES_PER_CHUNK=8
+KG_LLM_MODEL=deepseek-chat
+KG_FALLBACK_MODEL=deepseek-chat
+```
 
 ## 📄 License
 

@@ -34,7 +34,7 @@ EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "1024"))
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v4-flash")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com")
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
-LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "1024"))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 
 # ── Retriever 配置 ────────────────────────────────────────
 RETRIEVER_TOP_K = int(os.getenv("RETRIEVER_TOP_K", "5"))
@@ -52,6 +52,16 @@ NOTES_DIR = os.getenv("NOTES_DIR", "./notes")
 # ── 混合检索 配置 ─────────────────────────────────────────
 USE_HYBRID_SEARCH = os.getenv("USE_HYBRID_SEARCH", "true").lower() == "true"
 RRF_K = int(os.getenv("RRF_K", "60"))
+
+# ── 知识图谱 配置 ─────────────────────────────────────────
+KG_TRIPLES_PATH = os.getenv("KG_TRIPLES_PATH", "./kg_triples.json")
+USE_KG_EXTRACTION = os.getenv("USE_KG_EXTRACTION", "true").lower() == "true"
+USE_KG_RETRIEVAL = os.getenv("USE_KG_RETRIEVAL", "true").lower() == "true"
+KG_TOP_K = int(os.getenv("KG_TOP_K", "5"))
+KG_SCORE_BASE = float(os.getenv("KG_SCORE_BASE", "0.4"))
+KG_MAX_TRIPLES_PER_CHUNK = int(os.getenv("KG_MAX_TRIPLES_PER_CHUNK", "8"))
+KG_LLM_MODEL = os.getenv("KG_LLM_MODEL", "deepseek-chat")
+KG_FALLBACK_MODEL = os.getenv("KG_FALLBACK_MODEL", "deepseek-chat")
 
 # ── 可观测性 配置 ─────────────────────────────────────────
 METRICS_MAX_HISTORY = int(os.getenv("METRICS_MAX_HISTORY", "200"))

@@ -11,6 +11,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 import chromadb
 from embedder import ZhipuEmbedder
+from kg_extractor import extract_triples
+from kg_store import append_triples
 import config
 
 logger = logging.getLogger(__name__)
@@ -136,6 +138,23 @@ class DocumentProcessor:
             metadatas=metadatas,
         )
         logger.info("索引完成: %d chunks 已写入", len(docs))
+
+        if config.USE_KG_EXTRACTION:
+            logger.info("开始抽取知识图谱三元组...")
+            all_triples: list[dict] = []
+            for doc in docs:
+                try:
+                    triples = extract_triples(
+                        doc["text"],
+                        source=doc["metadata"]["source"],
+                        chunk_id=doc["id"],
+                    )
+                    all_triples.extend(triples)
+                except Exception as exc:
+                    logger.warning("三元组抽取失败 %s: %s", doc["id"], exc)
+
+            added = append_triples(all_triples)
+            logger.info("三元组写入完成: 新增 %d 条", added)
 
 
 if __name__ == "__main__":
