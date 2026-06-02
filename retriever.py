@@ -2,14 +2,18 @@
 检索模块：支持向量检索、BM25 关键词检索、混合检索 (RRF 融合) + Rerank
 """
 import logging
+from collections import defaultdict
+from pathlib import Path
 
 import jieba
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder
 import chromadb
+from openai import OpenAI
 
 from embedder import ZhipuEmbedder
 from kg_retriever import KGRetriever
+from intent_router import IntentRouter
 from metrics import Timer
 import config
 from typing import Optional
@@ -41,6 +45,18 @@ class Retriever:
         self.use_kg = config.USE_KG_RETRIEVAL
         if self.use_kg:
             self.kg = KGRetriever()
+
+        # Intent Router
+        self.use_intent_router = config.USE_INTENT_ROUTER
+        if self.use_intent_router:
+            self.intent_router = IntentRouter(self.embedder)
+
+        self.summary_client = None
+        if config.INTENT_ROUTER_GLOBAL_MODE == "summary":
+            self.summary_client = OpenAI(
+                api_key=config.DEEPSEEK_API_KEY,
+                base_url=config.LLM_BASE_URL,
+            )
 
         # 上次检索的分步耗时 (供可观测性使用)
         self.last_timing = {}
@@ -144,14 +160,200 @@ class Retriever:
         return output
 
     @staticmethod
-    def _merge_candidates(*result_lists: list[dict]) -> list[dict]:
-        merged: dict[str, dict] = {}
-        for results in result_lists:
-            for item in results:
+    def _chunk_id(source: str, chunk_index: int) -> str:
+        parts = list(Path(source).with_suffix("").parts)
+        return "_".join(parts) + f"_{chunk_index}"
+
+    @staticmethod
+    def _merge_candidates(
+        *scored_lists: tuple[str, list[dict]],
+        k: int = 60,
+        weights: dict[str, float] | None = None,
+    ) -> list[dict]:
+        weights = weights or {}
+        fused_scores: dict[str, float] = defaultdict(float)
+        doc_map: dict[str, dict] = {}
+        channel_hits: dict[str, set[str]] = defaultdict(set)
+
+        for channel, results in scored_lists:
+            channel_weight = weights.get(channel, 1.0)
+            for rank, item in enumerate(results):
                 doc_id = item["id"]
-                if doc_id not in merged or item["score"] > merged[doc_id]["score"]:
-                    merged[doc_id] = item
-        return sorted(merged.values(), key=lambda x: x["score"], reverse=True)
+                fused_scores[doc_id] += channel_weight / (k + rank + 1)
+                if doc_id not in doc_map or item["score"] > doc_map[doc_id].get("score", float("-inf")):
+                    doc_map[doc_id] = item
+                channel_hits[doc_id].add(channel)
+
+        merged: list[dict] = []
+        for doc_id, score in fused_scores.items():
+            item = dict(doc_map[doc_id])
+            item["score"] = score
+            item["channels"] = sorted(channel_hits[doc_id])
+            merged.append(item)
+        return sorted(merged, key=lambda x: x["score"], reverse=True)
+
+    def _expand_neighbor_chunks(
+        self,
+        seeds: list[dict],
+        window: int | None = None,
+        budget: int | None = None,
+    ) -> list[dict]:
+        if not seeds:
+            return []
+
+        window = config.RETRIEVER_NEIGHBOR_WINDOW if window is None else window
+        budget = config.RETRIEVER_NEIGHBOR_BUDGET if budget is None else budget
+        if window <= 0 or budget <= 0:
+            return []
+
+        neighbor_ids: list[str] = []
+        seen_ids = {item["id"] for item in seeds}
+
+        for seed in seeds:
+            metadata = seed.get("metadata") or {}
+            source = metadata.get("source")
+            chunk_index = metadata.get("chunk_index")
+            if source is None or chunk_index is None:
+                continue
+
+            for offset in range(1, window + 1):
+                for neighbor_index in (chunk_index - offset, chunk_index + offset):
+                    if neighbor_index < 0:
+                        continue
+                    neighbor_id = self._chunk_id(source, neighbor_index)
+                    if neighbor_id in seen_ids:
+                        continue
+                    seen_ids.add(neighbor_id)
+                    neighbor_ids.append(neighbor_id)
+                    if len(neighbor_ids) >= budget:
+                        break
+                if len(neighbor_ids) >= budget:
+                    break
+            if len(neighbor_ids) >= budget:
+                break
+
+        if not neighbor_ids:
+            return []
+
+        results = self.collection.get(ids=neighbor_ids, include=["documents", "metadatas"])
+        expanded: list[dict] = []
+        for rank, (doc_id, doc, meta) in enumerate(
+            zip(results["ids"], results["documents"], results["metadatas"])
+        ):
+            if doc is None:
+                continue
+            expanded.append(
+                {
+                    "id": doc_id,
+                    "text": doc,
+                    "metadata": meta,
+                    "score": config.RETRIEVER_WEIGHT_NEIGHBOR / (rank + 1),
+                    "channels": ["neighbor"],
+                }
+            )
+        return expanded
+
+    def _global_retrieve(
+        self,
+        query: str,
+        top_k: int,
+        max_sources: int,
+        max_chars: int,
+    ) -> list[dict]:
+        if self.use_hybrid:
+            vector_results = self._vector_search(query, top_k)
+            bm25_results = self._bm25_search(query, top_k)
+            candidates = self._merge_candidates(
+                ("vector", vector_results),
+                ("bm25", bm25_results),
+                k=config.RRF_K,
+                weights={
+                    "vector": config.RETRIEVER_WEIGHT_VECTOR,
+                    "bm25": config.RETRIEVER_WEIGHT_BM25,
+                },
+            )
+        else:
+            candidates = self._vector_search(query, top_k)
+
+        source_best: dict[str, dict] = {}
+        for item in candidates:
+            source = (item.get("metadata") or {}).get("source")
+            if not source:
+                continue
+            if source not in source_best or item["score"] > source_best[source]["score"]:
+                source_best[source] = item
+
+        ranked_sources = sorted(
+            source_best.values(), key=lambda x: x["score"], reverse=True
+        )[:max_sources]
+
+        contexts: list[dict] = []
+        for item in ranked_sources:
+            source = item["metadata"]["source"]
+            full_path = Path(config.NOTES_DIR) / source
+            text = item["text"]
+            if full_path.exists():
+                try:
+                    text = full_path.read_text(encoding="utf-8")
+                except Exception as exc:
+                    logger.warning("读取文档失败 %s: %s", full_path, exc)
+            if max_chars > 0 and len(text) > max_chars:
+                text = text[:max_chars].rstrip() + "\n... [truncated]"
+
+            contexts.append(
+                {
+                    "id": f"doc::{source}",
+                    "text": text,
+                    "metadata": {"source": source, "scope": "global"},
+                    "score": item["score"],
+                }
+            )
+
+        if config.INTENT_ROUTER_GLOBAL_MODE == "summary":
+            summary = self._summarize_global_contexts(query, contexts)
+            if summary:
+                source_list = [c["metadata"]["source"] for c in contexts]
+                return [
+                    {
+                        "id": "global_summary",
+                        "text": summary,
+                        "metadata": {
+                            "source": "global_summary",
+                            "scope": "global_summary",
+                            "sources": source_list,
+                        },
+                        "score": max((c["score"] for c in contexts), default=0.0),
+                    }
+                ]
+
+        return contexts
+
+    def _summarize_global_contexts(self, query: str, contexts: list[dict]) -> str:
+        if not self.summary_client or not contexts:
+            return ""
+
+        joined = "\n\n---\n\n".join(
+            f"[来源: {c['metadata']['source']}]\n{c['text']}" for c in contexts
+        )
+        prompt = (
+            "你是一个知识库摘要助手。请基于提供的材料回答用户问题，"
+            "输出一段简洁摘要，并尽量在关键要点后用 [来源] 标注来源文件名。"
+        )
+
+        try:
+            response = self.summary_client.chat.completions.create(
+                model=config.INTENT_ROUTER_GLOBAL_SUMMARY_MODEL,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": f"问题: {query}\n\n材料:\n{joined}"},
+                ],
+                temperature=0.2,
+                max_tokens=config.INTENT_ROUTER_GLOBAL_SUMMARY_MAX_TOKENS,
+            )
+            return response.choices[0].message.content or ""
+        except Exception as exc:
+            logger.warning("全局摘要生成失败: %s", exc)
+            return ""
 
     # ── 主检索入口 ────────────────────────────────────────
 
@@ -168,14 +370,34 @@ class Retriever:
         mode: "auto"(按配置), "vector", "bm25", "hybrid"
         use_rerank: 覆盖配置的 reranker 开关 (用于消融实验)
         """
-        top_k = top_k or config.RETRIEVER_TOP_K
+        top_k = top_k or config.RETRIEVER_RECALL_TOP_K
         final_k = final_k or config.RETRIEVER_FINAL_K
         if use_rerank is None:
             use_rerank = self.use_reranker
+        self.last_timing = {}
+
+        if mode == "auto" and self.use_intent_router:
+            route, route_info = self.intent_router.route(query)
+            self.last_timing["route"] = route
+            self.last_timing["route_info"] = route_info
+            if route == "global":
+                with Timer() as t_embed:
+                    candidates = self._global_retrieve(
+                        query,
+                        top_k=config.INTENT_ROUTER_GLOBAL_TOP_K,
+                        max_sources=config.INTENT_ROUTER_GLOBAL_MAX_SOURCES,
+                        max_chars=config.INTENT_ROUTER_GLOBAL_MAX_CHARS,
+                    )
+                self.last_timing["embed_ms"] = t_embed.elapsed_ms
+                self.last_timing["rerank_ms"] = 0.0
+                self.last_timing["mode"] = "global"
+                return [
+                    {"text": c["text"], "metadata": c["metadata"], "score": c["score"]}
+                    for c in candidates
+                ]
+
         if mode == "auto":
             mode = "hybrid" if self.use_hybrid else "vector"
-
-        self.last_timing = {}
 
         # ── Embedding + 检索 ──
         with Timer() as t_embed:
@@ -184,8 +406,14 @@ class Retriever:
             elif mode == "hybrid":
                 vector_results = self._vector_search(query, top_k)
                 bm25_results = self._bm25_search(query, top_k)
-                candidates = self._rrf_fusion(
-                    vector_results, bm25_results, k=config.RRF_K
+                candidates = self._merge_candidates(
+                    ("vector", vector_results),
+                    ("bm25", bm25_results),
+                    k=config.RRF_K,
+                    weights={
+                        "vector": config.RETRIEVER_WEIGHT_VECTOR,
+                        "bm25": config.RETRIEVER_WEIGHT_BM25,
+                    },
                 )
             else:  # vector
                 candidates = self._vector_search(query, top_k)
@@ -198,7 +426,12 @@ class Retriever:
                 kg_candidates = self._kg_search(query, config.KG_TOP_K)
             self.last_timing["kg_ms"] = t_kg.elapsed_ms
             if kg_candidates:
-                candidates = self._merge_candidates(candidates, kg_candidates)
+                candidates = self._merge_candidates(
+                    ("base", candidates),
+                    ("kg", kg_candidates),
+                    k=config.RRF_K,
+                    weights={"base": 1.0, "kg": config.RETRIEVER_WEIGHT_KG},
+                )
             merged_count = len(candidates)
             hit_rate = len(kg_candidates) / max(merged_count, 1)
             logger.info(
@@ -213,14 +446,29 @@ class Retriever:
 
         # ── Rerank ──
         rerank_ms = 0.0
-        if use_rerank and self.use_reranker and candidates:
+        seed_candidates = candidates[:final_k]
+
+        if use_rerank and self.use_reranker and seed_candidates:
             with Timer() as t_rerank:
-                pairs = [[query, c["text"]] for c in candidates]
+                pairs = [[query, c["text"]] for c in seed_candidates]
                 scores = self.reranker.predict(pairs)
-                for c, s in zip(candidates, scores):
+                for c, s in zip(seed_candidates, scores):
                     c["score"] = float(s)
-                candidates.sort(key=lambda x: x["score"], reverse=True)
+                seed_candidates.sort(key=lambda x: x["score"], reverse=True)
             rerank_ms = t_rerank.elapsed_ms
+
+        expanded_neighbors = self._expand_neighbor_chunks(seed_candidates)
+        candidates = [*seed_candidates, *expanded_neighbors]
+
+        deduped: list[dict] = []
+        seen_ids: set[str] = set()
+        for item in candidates:
+            doc_id = item["id"]
+            if doc_id in seen_ids:
+                continue
+            seen_ids.add(doc_id)
+            deduped.append(item)
+        candidates = deduped
 
         self.last_timing["rerank_ms"] = rerank_ms
         self.last_timing["mode"] = mode
@@ -229,4 +477,4 @@ class Retriever:
         return [
             {"text": c["text"], "metadata": c["metadata"], "score": c["score"]}
             for c in candidates
-        ][:final_k]
+        ]

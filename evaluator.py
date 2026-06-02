@@ -139,6 +139,7 @@ def run_eval(
     results = []
     for i, case in enumerate(test_cases):
         query = case["query"]
+        expected_keywords = case.get("expected_keywords", [])
         logger.info("评估 [%d/%d] mode=%s rerank=%s: %s",
                      i + 1, len(test_cases), retrieve_mode, use_rerank, query)
 
@@ -148,6 +149,7 @@ def run_eval(
             )
             answer = generator.generate(query, contexts)
             ctx_texts = [c["text"] for c in contexts]
+            keyword_coverage = _keyword_coverage(query, ctx_texts, answer, expected_keywords)
 
             # Embedding 评分
             emb_relevance = emb_eval.relevance_score(query, ctx_texts)
@@ -158,6 +160,7 @@ def run_eval(
                 "emb_relevance": round(emb_relevance, 4),
                 "emb_faithfulness": round(emb_faithfulness, 4),
                 "answer_length": len(answer),
+                "keyword_coverage": round(keyword_coverage, 4),
             }
 
             # LLM Judge 评分
@@ -183,6 +186,7 @@ def run_eval(
         "num_success": len(valid),
         "emb_relevance_avg": _avg(valid, "emb_relevance"),
         "emb_faithfulness_avg": _avg(valid, "emb_faithfulness"),
+        "keyword_coverage_avg": _avg(valid, "keyword_coverage"),
     }
 
     if use_llm_judge and valid and "llm_relevance" in valid[0]:
@@ -203,3 +207,16 @@ def run_eval(
 def _avg(items: list[dict], key: str) -> float:
     vals = [r[key] for r in items if key in r]
     return round(float(np.mean(vals)), 4) if vals else 0.0
+
+
+def _keyword_coverage(query: str, contexts: list[str], answer: str, expected_keywords: list[str]) -> float:
+    """计算预期关键词覆盖率：关键词只要出现在上下文或回答中即算命中。"""
+    if not expected_keywords:
+        return 0.0
+
+    haystack = "\n".join([query, answer, *contexts]).lower()
+    hits = 0
+    for keyword in expected_keywords:
+        if str(keyword).lower() in haystack:
+            hits += 1
+    return hits / len(expected_keywords)

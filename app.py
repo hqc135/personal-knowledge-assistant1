@@ -62,8 +62,15 @@ def chat(message: str, history: list | None):
         return
 
     # 来源信息
+    def _format_source(item: dict) -> str:
+        meta = item.get("metadata") or {}
+        if "sources" in meta:
+            joined = ", ".join(meta["sources"])
+            return f"{meta.get('source', 'summary')} [{joined}]"
+        return str(meta.get("source", "unknown"))
+
     sources = "\n".join(
-        f"- {c['metadata']['source']} (score: {c['score']:.3f})"
+        f"- {_format_source(c)} (score: {c['score']:.3f})"
         for c in contexts
     )
     source_block = f"\n\n---\n📎 参考来源:\n{sources}"

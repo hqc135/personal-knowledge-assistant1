@@ -39,8 +39,39 @@ LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 # ── Retriever 配置 ────────────────────────────────────────
 RETRIEVER_TOP_K = int(os.getenv("RETRIEVER_TOP_K", "5"))
 RETRIEVER_FINAL_K = int(os.getenv("RETRIEVER_FINAL_K", "3"))
+RETRIEVER_RECALL_TOP_K = int(os.getenv("RETRIEVER_RECALL_TOP_K", "10"))
+RETRIEVER_NEIGHBOR_WINDOW = int(os.getenv("RETRIEVER_NEIGHBOR_WINDOW", "1"))
+RETRIEVER_NEIGHBOR_BUDGET = int(os.getenv("RETRIEVER_NEIGHBOR_BUDGET", "2"))
+RETRIEVER_WEIGHT_VECTOR = float(os.getenv("RETRIEVER_WEIGHT_VECTOR", "0.45"))
+RETRIEVER_WEIGHT_BM25 = float(os.getenv("RETRIEVER_WEIGHT_BM25", "0.35"))
+RETRIEVER_WEIGHT_KG = float(os.getenv("RETRIEVER_WEIGHT_KG", "0.20"))
+RETRIEVER_WEIGHT_NEIGHBOR = float(os.getenv("RETRIEVER_WEIGHT_NEIGHBOR", "0.10"))
 RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
 USE_RERANKER = os.getenv("USE_RERANKER", "true").lower() == "true"
+
+# ── Intent Router 配置 ────────────────────────────────────
+USE_INTENT_ROUTER = os.getenv("USE_INTENT_ROUTER", "true").lower() == "true"
+INTENT_ROUTER_PROTOTYPES_PATH = os.getenv(
+    "INTENT_ROUTER_PROTOTYPES_PATH", "./intent_prototypes.json"
+)
+INTENT_ROUTER_MIN_SCORE = float(os.getenv("INTENT_ROUTER_MIN_SCORE", "0.35"))
+INTENT_ROUTER_MIN_MARGIN = float(os.getenv("INTENT_ROUTER_MIN_MARGIN", "0.05"))
+INTENT_ROUTER_AGG = os.getenv("INTENT_ROUTER_AGG", "max")
+INTENT_ROUTER_FALLBACK = os.getenv("INTENT_ROUTER_FALLBACK", "local")
+INTENT_ROUTER_GLOBAL_TOP_K = int(os.getenv("INTENT_ROUTER_GLOBAL_TOP_K", "12"))
+INTENT_ROUTER_GLOBAL_MAX_SOURCES = int(
+    os.getenv("INTENT_ROUTER_GLOBAL_MAX_SOURCES", "3")
+)
+INTENT_ROUTER_GLOBAL_MAX_CHARS = int(
+    os.getenv("INTENT_ROUTER_GLOBAL_MAX_CHARS", "4000")
+)
+INTENT_ROUTER_GLOBAL_MODE = os.getenv("INTENT_ROUTER_GLOBAL_MODE", "full")
+INTENT_ROUTER_GLOBAL_SUMMARY_MODEL = os.getenv(
+    "INTENT_ROUTER_GLOBAL_SUMMARY_MODEL", LLM_MODEL
+)
+INTENT_ROUTER_GLOBAL_SUMMARY_MAX_TOKENS = int(
+    os.getenv("INTENT_ROUTER_GLOBAL_SUMMARY_MAX_TOKENS", "800")
+)
 
 # ── Data Pipeline 配置 ────────────────────────────────────
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "512"))
@@ -62,6 +93,8 @@ KG_SCORE_BASE = float(os.getenv("KG_SCORE_BASE", "0.4"))
 KG_MAX_TRIPLES_PER_CHUNK = int(os.getenv("KG_MAX_TRIPLES_PER_CHUNK", "8"))
 KG_LLM_MODEL = os.getenv("KG_LLM_MODEL", "deepseek-chat")
 KG_FALLBACK_MODEL = os.getenv("KG_FALLBACK_MODEL", "deepseek-chat")
+KG_ENTITY_VECTOR_TOP_K = int(os.getenv("KG_ENTITY_VECTOR_TOP_K", "5"))
+KG_ENTITY_VECTOR_MIN_SIM = float(os.getenv("KG_ENTITY_VECTOR_MIN_SIM", "0.35"))
 
 # ── 可观测性 配置 ─────────────────────────────────────────
 METRICS_MAX_HISTORY = int(os.getenv("METRICS_MAX_HISTORY", "200"))

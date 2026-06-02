@@ -19,7 +19,8 @@ from logger import setup_logging
 from retriever import Retriever
 from generator import Generator
 from evaluator import run_eval
-from typing import TypedDict
+from typing import TypedDict, Optional
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -28,15 +29,108 @@ logger = logging.getLogger(__name__)
 class Experiment(TypedDict):
     name: str
     mode: str
-    rerank: bool
+    rerank: Optional[bool]
+    use_intent_router: Optional[bool]
+    use_kg: Optional[bool]
+    neighbor_window: Optional[int]
+    neighbor_budget: Optional[int]
+    global_mode: Optional[str]
 
 EXPERIMENTS: list[Experiment] = [
-    {"name": "Vector Only",        "mode": "vector",  "rerank": False},
-    {"name": "Vector + Reranker",  "mode": "vector",  "rerank": True},
-    {"name": "BM25 Only",          "mode": "bm25",    "rerank": False},
-    {"name": "Hybrid (RRF)",       "mode": "hybrid",  "rerank": False},
-    {"name": "Hybrid + Reranker",  "mode": "hybrid",  "rerank": True},
+    {
+        "name": "Auto (Main Pipeline)",
+        "mode": "auto",
+        "rerank": None,
+        "use_intent_router": True,
+        "use_kg": None,
+        "neighbor_window": None,
+        "neighbor_budget": None,
+        "global_mode": None,
+    },
+    {
+        "name": "Auto (No Intent Router)",
+        "mode": "auto",
+        "rerank": None,
+        "use_intent_router": False,
+        "use_kg": False,
+        "neighbor_window": 0,
+        "neighbor_budget": 0,
+        "global_mode": None,
+    },
+    {
+        "name": "Vector Only",
+        "mode": "vector",
+        "rerank": False,
+        "use_intent_router": None,
+        "use_kg": False,
+        "neighbor_window": 0,
+        "neighbor_budget": 0,
+        "global_mode": None,
+    },
+    {
+        "name": "Vector + Reranker",
+        "mode": "vector",
+        "rerank": True,
+        "use_intent_router": None,
+        "use_kg": False,
+        "neighbor_window": 0,
+        "neighbor_budget": 0,
+        "global_mode": None,
+    },
+    {
+        "name": "BM25 Only",
+        "mode": "bm25",
+        "rerank": False,
+        "use_intent_router": None,
+        "use_kg": False,
+        "neighbor_window": 0,
+        "neighbor_budget": 0,
+        "global_mode": None,
+    },
+    {
+        "name": "Hybrid (RRF)",
+        "mode": "hybrid",
+        "rerank": False,
+        "use_intent_router": None,
+        "use_kg": False,
+        "neighbor_window": 0,
+        "neighbor_budget": 0,
+        "global_mode": None,
+    },
+    {
+        "name": "Hybrid + Reranker",
+        "mode": "hybrid",
+        "rerank": True,
+        "use_intent_router": None,
+        "use_kg": False,
+        "neighbor_window": 0,
+        "neighbor_budget": 0,
+        "global_mode": None,
+    },
 ]
+
+
+def _apply_overrides(exp: Experiment) -> dict[str, object]:
+    overrides: dict[str, object] = {
+        "USE_INTENT_ROUTER": exp["use_intent_router"],
+        "USE_KG_RETRIEVAL": exp["use_kg"],
+        "RETRIEVER_NEIGHBOR_WINDOW": exp["neighbor_window"],
+        "RETRIEVER_NEIGHBOR_BUDGET": exp["neighbor_budget"],
+        "INTENT_ROUTER_GLOBAL_MODE": exp["global_mode"],
+    }
+
+    prev: dict[str, object] = {}
+    for key, value in overrides.items():
+        if value is None:
+            continue
+        prev[key] = getattr(config, key)
+        setattr(config, key, value)
+    return prev
+
+
+def _restore_overrides(prev: dict[str, object]) -> None:
+    for key, value in prev.items():
+        setattr(config, key, value)
 
 
 def run_ablation(
@@ -60,14 +154,23 @@ def run_ablation(
         logger.info("实验: %s", exp["name"])
         logger.info("=" * 50)
 
-        result = run_eval(
-            cases,
-            retriever,
-            generator,
-            retrieve_mode=exp["mode"],
-            use_rerank=exp["rerank"],
-            use_llm_judge=use_llm_judge,
-        )
+        prev = _apply_overrides(exp)
+        if prev:
+            logger.info("实验覆盖配置: %s", {k: getattr(config, k) for k in prev})
+
+        try:
+            retriever = Retriever()
+            generator = Generator()
+            result = run_eval(
+                cases,
+                retriever,
+                generator,
+                retrieve_mode=exp["mode"],
+                use_rerank=exp["rerank"],
+                use_llm_judge=use_llm_judge,
+            )
+        finally:
+            _restore_overrides(prev)
         result["experiment"] = exp["name"]
         all_results.append(result)
 

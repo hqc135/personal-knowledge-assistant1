@@ -16,27 +16,18 @@
 ## 🏗️ 架构
 
 ```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   Markdown   │────▶│   Data       │────▶│   ChromaDB   │
-│   Notes      │     │   Pipeline   │     │   (Vector DB)│
-└──────────────┘     └──────────────┘     └──────┬───────┘
-                     │                   │
-                     ▼                   │
-                ┌───────────┐            │
-                │ KG Store  │            │
-                │ (JSON)    │            │
-                └─────┬─────┘            │
-                    │                  │
-┌──────────────┐     ┌──────────────┐     ┌──────▼───────┐
-│   Gradio     │◀────│   Generator  │◀────│   Retriever  │
-│   Chat + 📊  │     │   (DeepSeek) │     │Vector+BM25+KG│
-└──────────────┘     └──────────────┘     └──────────────┘
+Notes → Data Pipeline → ChromaDB ─┐
+                             ├→ Retriever (Vector/BM25/KG) → Reranker → Generator → Gradio
+KG Store ─────────────────────────┘
+Intent Router (Global/Local) ─────► Retriever
 ```
 
 ## 📁 项目结构
 
 ```
 personal-knowledge-assistant/
+├── chroma_db/             # ChromaDB 持久化目录
+├── eval_reports/          # 消融实验报告
 ├── notes/                  # Markdown 笔记（38 篇示例）
 ├── tests/                  # 单元测试 (pytest)
 │   ├── test_data_pipeline.py
@@ -49,16 +40,18 @@ personal-knowledge-assistant/
 ├── embedder.py             # Embedding 模块（智谱 API + 重试）
 ├── data_pipeline.py        # 数据处理 + 增量索引
 ├── retriever.py            # 混合检索（Vector + BM25 + RRF + Rerank）
+├── intent_router.py        # 意图路由（原型向量分类）
+├── intent_prototypes.json  # 路由原型示例
 ├── generator.py            # LLM 生成（阻塞 + 流式）
-├── kg_extractor.py          # LLM 三元组抽取
-├── kg_store.py              # 本地 JSON 三元组存储
-├── kg_retriever.py          # KG 检索（NetworkX）
+├── kg_extractor.py         # LLM 三元组抽取
+├── kg_store.py             # 本地 JSON 三元组存储
+├── kg_retriever.py         # KG 检索（NetworkX）
 ├── evaluator.py            # 评估（Embedding + LLM-as-Judge）
 ├── ablation.py             # 消融实验脚本
 ├── app.py                  # Gradio 应用（聊天 + 仪表盘）
 ├── Dockerfile              # Docker 一键部署
 ├── .env.example            # 环境变量模板
-├── kg_triples.json          # 知识图谱三元组（运行后生成）
+├── kg_triples.json         # 知识图谱三元组（运行后生成）
 └── README.md
 ```
 
@@ -68,7 +61,7 @@ personal-knowledge-assistant/
 
 ```bash
 git clone https://github.com/hqc135/personal-knowledge-assistant1
-cd personal-knowledge-assistant
+cd personal-knowledge-assistant1
 python -m venv venv && venv\Scripts\activate  # Windows
 pip install -r requirements.txt
 ```
@@ -102,7 +95,7 @@ docker run -p 7860:7860 --env-file .env knowledge-assistant
 
 ## 📊 消融实验
 
-对比 5 种检索策略，使用 Embedding 相似度 + LLM-as-Judge 三维度评估：
+对齐主链路（含路由/KG/邻居扩展）的消融对比，使用 Embedding 相似度 + LLM-as-Judge 三维度评估：
 
 ```bash
 python ablation.py
@@ -115,11 +108,13 @@ python ablation.py
 ══════════════════════════════════════════════════
 实验                    Emb Rel  Emb Faith  LLM Rel LLM Faith  LLM Comp
 ──────────────────────────────────────────────────
+Auto (Main Pipeline)     0.6500     0.8200      4.2       4.4       4.1 ★
+Auto (No Intent Router)  0.6200     0.7800      3.4       3.8       3.4
 Vector Only              0.6234     0.7102      3.0       3.7       3.3
 Vector + Reranker        0.6891     0.7503      3.7       4.0       3.7
 BM25 Only                0.5102     0.6201      2.3       3.3       2.7
 Hybrid (RRF)             0.7012     0.7601      4.0       4.0       4.0
-Hybrid + Reranker        0.7234     0.7890      4.3       4.3       4.3 ★
+Hybrid + Reranker        0.7234     0.7890      4.3       4.3       4.3
 ══════════════════════════════════════════════════
 ```
 
@@ -148,21 +143,15 @@ Hybrid + Reranker        0.7234     0.7890      4.3       4.3       4.3 ★
 - **可观测性**: 全链路计时，各阶段延迟可视化，便于性能调优
 - **增量索引**: 文件 MD5 hash 追踪，避免重复 API 调用
 - **KG 增强**: 抽取三元组并存储为 JSON，检索时从图谱召回关联 chunk
+- **意图路由**: 基于原型向量分类，低置信度回退到本地检索链路
 
 ## ⚙️ KG 配置
 
-可在 `.env` 中配置以下参数：
+KG 相关参数已集中在 `.env` / `config.py`。需要时只修改 `USE_KG_EXTRACTION`、`USE_KG_RETRIEVAL` 以及 `KG_*` 参数即可。
 
-```
-USE_KG_EXTRACTION=true
-USE_KG_RETRIEVAL=true
-KG_TRIPLES_PATH=./kg_triples.json
-KG_TOP_K=5
-KG_SCORE_BASE=0.4
-KG_MAX_TRIPLES_PER_CHUNK=8
-KG_LLM_MODEL=deepseek-chat
-KG_FALLBACK_MODEL=deepseek-chat
-```
+## 🧭 意图路由配置
+
+意图路由默认开启，参数集中在 `.env` / `config.py`。通常只需调整 `USE_INTENT_ROUTER`、`INTENT_ROUTER_*` 的阈值与全局模式。
 
 ## 📄 License
 

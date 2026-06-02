@@ -15,6 +15,13 @@ logger = logging.getLogger(__name__)
 
 _PROMPT = """You are an information extraction system.
 Extract up to {max_triples} triples from the text. Each triple is (head, relation, tail).
+Canonicalization rules for entities:
+1) head and tail MUST use a single canonical entity form, not aliases, pronouns, or paraphrases.
+2) If the same entity appears multiple times, use the same exact surface form everywhere.
+3) Prefer the most specific stable name in the text; do not invent new names.
+4) Keep entity text concise and normalized, but do not over-compress meaningful technical terms.
+5) If a mention is ambiguous, pick the clearest canonical name that best matches the text context.
+6) Relation should be a concise normalized predicate phrase.
 Return ONLY valid JSON in one of the following formats:
 1) [{{"head": "...", "relation": "...", "tail": "..."}}, ...]
 2) {{"triples": [{{"head": "...", "relation": "...", "tail": "..."}}, ...]}}

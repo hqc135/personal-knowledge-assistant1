@@ -1,14 +1,122 @@
 [
   {
     "query": "总结一下我关于 RAG 的笔记",
+    "category": "rag",
+    "difficulty": "easy",
     "expected_keywords": ["RAG", "检索", "生成"]
   },
   {
+    "query": "RAG 里 chunking 为什么重要",
+    "category": "rag",
+    "difficulty": "medium",
+    "expected_keywords": ["chunking", "切分", "上下文"]
+  },
+  {
+    "query": "我关于向量数据库和混合检索的笔记有哪些",
+    "category": "retrieval",
+    "difficulty": "medium",
+    "expected_keywords": ["向量数据库", "混合检索", "BM25"]
+  },
+  {
+    "query": "总结一下 reranker 的作用和使用场景",
+    "category": "retrieval",
+    "difficulty": "medium",
+    "expected_keywords": ["reranker", "重排序", "相关性"]
+  },
+  {
     "query": "我之前记录的面试准备要点有哪些",
+    "category": "interview",
+    "difficulty": "easy",
     "expected_keywords": ["面试", "准备"]
   },
   {
+    "query": "面试中系统设计题我该重点看什么",
+    "category": "interview",
+    "difficulty": "medium",
+    "expected_keywords": ["系统设计", "面试", "题"]
+  },
+  {
     "query": "系统设计的关键原则是什么",
+    "category": "system_design",
+    "difficulty": "easy",
     "expected_keywords": ["系统设计", "原则"]
+  },
+  {
+    "query": "高并发场景下缓存策略有哪些",
+    "category": "system_design",
+    "difficulty": "medium",
+    "expected_keywords": ["缓存", "并发", "策略"]
+  },
+  {
+    "query": "我关于微服务拆分的笔记有哪些",
+    "category": "system_design",
+    "difficulty": "medium",
+    "expected_keywords": ["微服务", "拆分", "服务"]
+  },
+  {
+    "query": "注意力机制和 Transformer 架构我记了什么",
+    "category": "llm",
+    "difficulty": "medium",
+    "expected_keywords": ["注意力", "Transformer", "架构"]
+  },
+  {
+    "query": "我记录的 tokenization 相关内容有哪些",
+    "category": "llm",
+    "difficulty": "easy",
+    "expected_keywords": ["tokenization", "分词", "词元"]
+  },
+  {
+    "query": "关于 embedding 模型我有哪些笔记",
+    "category": "llm",
+    "difficulty": "easy",
+    "expected_keywords": ["embedding", "模型", "向量"]
+  },
+  {
+    "query": "知识图谱相关内容里有哪些关键术语",
+    "category": "kg",
+    "difficulty": "medium",
+    "expected_keywords": ["知识图谱", "三元组", "实体"]
+  },
+  {
+    "query": "我关于知识图谱抽取失败和调试的记录有哪些",
+    "category": "kg",
+    "difficulty": "hard",
+    "expected_keywords": ["知识图谱", "抽取", "失败"]
+  },
+  {
+    "query": "数据标注和特征工程的笔记有哪些",
+    "category": "ml",
+    "difficulty": "medium",
+    "expected_keywords": ["数据标注", "特征工程"]
+  },
+  {
+    "query": "联邦学习和分布式训练我记录了什么",
+    "category": "ml",
+    "difficulty": "medium",
+    "expected_keywords": ["联邦学习", "分布式训练"]
+  },
+  {
+    "query": "关于模型部署和推理优化有哪些要点",
+    "category": "mlops",
+    "difficulty": "medium",
+    "expected_keywords": ["模型部署", "推理优化", "Serving"]
+  },
+  {
+    "query": "我关于 prompt engineering 的记录有哪些",
+    "category": "prompt",
+    "difficulty": "easy",
+    "expected_keywords": ["prompt", "工程", "提示词"]
+  },
+  {
+    "query": "总结一下我关于评估指标和实验方法的笔记",
+    "category": "evaluation",
+    "difficulty": "medium",
+    "expected_keywords": ["评估", "指标", "实验"]
+  },
+  {
+    "query": "我记录的记忆管理和缓存策略有什么联系",
+    "category": "system_design",
+    "difficulty": "hard",
+    "expected_keywords": ["记忆", "缓存", "策略"]
   }
 ]
