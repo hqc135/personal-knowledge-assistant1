@@ -69,6 +69,7 @@ class Generator:
         system_prompt = (
             "你是一个知识库助手。根据提供的上下文回答问题。\n"
             "【分数语义说明】：\n"
+            "- raw_scores: 各通道原始分数，仅用于调试与审计\n"
             "- rerank_compressed_score: 二阶段精排置信度(0~1，越接近1越相关)\n"
             "- rrf_position_score: 多通道粗排融合位置分\n"
             "- vector_similarity: 纯向量空间几何相似度\n"

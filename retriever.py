@@ -75,6 +75,9 @@ class Retriever:
         with Timer() as t_align:
             alignment = self.query_aligner.align(query)
         self.last_timing["align_ms"] = t_align.elapsed_ms
+        self.last_timing["align_triggered"] = bool(
+            getattr(alignment, "should_expand", False) and getattr(alignment, "expansions", [])
+        )
         self.last_timing["query_alignment"] = alignment.to_dict()
         return alignment.search_query, alignment
 
@@ -467,16 +470,24 @@ class Retriever:
         final_k = final_k or config.RETRIEVER_FINAL_K
         if use_rerank is None:
             use_rerank = self.use_reranker
-        self.last_timing = {}
+        self.last_timing = {
+            "align_ms": 0.0,
+            "rerank_ms": 0.0,
+            "route_decision": "local",
+            "align_triggered": False,
+            "rerank_active": False,
+        }
 
         if mode == "auto" and self.use_intent_router:
             route, route_info = self.intent_router.route(query)
             self.last_timing["route"] = route
+            self.last_timing["route_decision"] = route
             self.last_timing["route_info"] = route_info
 
             if route == "global":
                 aligned_query, _alignment = self._align_query(query)
                 self.last_timing["aligned_query"] = aligned_query
+                self.last_timing["route_decision"] = "global"
                 with Timer() as t_embed:
                     candidates = self._global_retrieve(
                         aligned_query,
@@ -485,8 +496,8 @@ class Retriever:
                         max_chars=config.INTENT_ROUTER_GLOBAL_MAX_CHARS,
                     )
                 self.last_timing["embed_ms"] = t_embed.elapsed_ms
-                self.last_timing["rerank_ms"] = 0.0
                 self.last_timing["mode"] = "global"
+                self.last_timing["rerank_active"] = False
             # 💡 扩充出口载荷，透传 channels 和 channel_scores
                 return [
                     {
@@ -501,6 +512,7 @@ class Retriever:
 
         aligned_query, _alignment = self._align_query(query)
         self.last_timing["aligned_query"] = aligned_query
+        self.last_timing["route_decision"] = "local"
 
         if mode == "auto":
             mode = "hybrid" if self.use_hybrid else "vector"
@@ -564,6 +576,9 @@ class Retriever:
                     c["score"] = float(1 / (1 + np.exp(-s)))
                 seed_candidates.sort(key=lambda x: x["score"], reverse=True)
             rerank_ms = t_rerank.elapsed_ms
+            self.last_timing["rerank_active"] = True
+        else:
+            self.last_timing["rerank_active"] = False
 
         expanded_neighbors = self._expand_neighbor_chunks(seed_candidates)
         candidates = [*seed_candidates, *expanded_neighbors]
