@@ -6,6 +6,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import jieba
+import numpy as np
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder
 import chromadb
@@ -235,6 +236,7 @@ class Retriever:
                     for channel, metadata in channel_metadata[doc_id].items()
                 ]
             )
+            item["metadata"]["score_type"] = "rrf_position_score"
             item["score"] = score
             item["channels"] = sorted(channel_hits[doc_id])
             item["channel_scores"] = dict(channel_scores[doc_id])
@@ -291,11 +293,13 @@ class Retriever:
         ):
             if doc is None:
                 continue
+            meta_dict = dict(meta or {})
+            meta_dict["score_type"] = "neighbor_boost_score"
             expanded.append(
                 {
                     "id": doc_id,
                     "text": doc,
-                    "metadata": meta,
+                    "metadata": meta_dict,
                     "score": config.RETRIEVER_WEIGHT_NEIGHBOR / (rank + 1),
                     "channels": ["neighbor"],
                 }
@@ -387,7 +391,11 @@ class Retriever:
                 {
                     "id": f"doc::{source}",
                     "text": text,
-                    "metadata": {"source": source, "scope": "global"},
+                    "metadata": {
+                        "source": source,
+                        "scope": "global",
+                        "score_type": "rrf_position_score" if self.use_hybrid else "vector_similarity",
+                    },
                     "score": item["score"],
                 }
             )
@@ -404,6 +412,8 @@ class Retriever:
                             "source": "global_summary",
                             "scope": "global_summary",
                             "sources": source_list,
+                            "score_type": "derived_context_max_score",
+                            "is_global_summary_block": True,
                         },
                         "score": max((c["score"] for c in contexts), default=0.0),
                     }
@@ -477,8 +487,15 @@ class Retriever:
                 self.last_timing["embed_ms"] = t_embed.elapsed_ms
                 self.last_timing["rerank_ms"] = 0.0
                 self.last_timing["mode"] = "global"
+            # 💡 扩充出口载荷，透传 channels 和 channel_scores
                 return [
-                    {"text": c["text"], "metadata": c["metadata"], "score": c["score"]}
+                    {
+                        "text": c["text"], 
+                        "metadata": c["metadata"], 
+                        "score": c["score"],
+                        "channels": c.get("channels", []),
+                        "channel_scores": c.get("channel_scores", {})
+                    }
                     for c in candidates
                 ]
 
@@ -542,7 +559,9 @@ class Retriever:
                 pairs = [[aligned_query, c["text"]] for c in seed_candidates]
                 scores = self.reranker.predict(pairs)
                 for c, s in zip(seed_candidates, scores):
-                    c["score"] = float(s)
+                    c.setdefault("metadata", {})["raw_rerank_logit"] = float(s)
+                    c["metadata"]["score_type"] = "rerank_compressed_score"
+                    c["score"] = float(1 / (1 + np.exp(-s)))
                 seed_candidates.sort(key=lambda x: x["score"], reverse=True)
             rerank_ms = t_rerank.elapsed_ms
 
@@ -562,9 +581,16 @@ class Retriever:
         self.last_timing["rerank_ms"] = rerank_ms
         self.last_timing["mode"] = mode
 
-        # 去掉内部 id 字段再返回
+# 去掉内部 id 字段再返回
         candidates = self._sort_local_contexts(candidates)
+        # 💡 扩充出口载荷，确保精排、粗排后的多维通道特征完整流入 generator.py
         return [
-            {"text": c["text"], "metadata": c["metadata"], "score": c["score"]}
+            {
+                "text": c["text"], 
+                "metadata": c["metadata"], 
+                "score": c["score"],
+                "channels": c.get("channels", []),
+                "channel_scores": c.get("channel_scores", {})
+            }
             for c in candidates
         ]

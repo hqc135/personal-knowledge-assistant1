@@ -20,6 +20,8 @@ class Generator:
     def _format_evidence_chain(context: dict) -> str:
         metadata = context.get("metadata") or {}
         source = metadata.get("source", "unknown")
+        
+        # 💡 极简对齐：无条件信任上游契约，直接从 root 层取数据，毫无臃肿逻辑
         channels = context.get("channels") or []
         raw_scores = context.get("channel_scores") or {}
         merged_score = context.get("score")
@@ -33,14 +35,22 @@ class Generator:
                 for channel, score in sorted(raw_scores.items())
             )
             lines.append(f"[raw_scores: {score_chain}]")
+            
+        # 💡 动态标签：仅用一行代码替换原本硬编码的 fused_score 即可
+        score_type = metadata.get("score_type", "fused_score")
         if merged_score is not None:
-            lines.append(f"[fused_score: {float(merged_score):.4f}]")
+            lines.append(f"[{score_type}: {float(merged_score):.4f}]")
+            
+        # 裸露未压缩的精排原始分（如果有）
+        if "raw_rerank_logit" in metadata:
+            lines.append(f"[raw_rerank_logit: {float(metadata['raw_rerank_logit']):.4f}]")
 
         if metadata:
+            # 清理已经被格式化暴露出来的内部键，降低 prompt 杂质
             evidence_meta = {
                 key: value
                 for key, value in metadata.items()
-                if key not in {"source", "channel_metadata"}
+                if key not in {"source", "channel_metadata", "score_type", "raw_rerank_logit", "scope", "is_global_summary_block"}
             }
             if evidence_meta:
                 lines.append(f"[metadata: {evidence_meta}]")
@@ -55,15 +65,22 @@ class Generator:
             for c in contexts
         )
 
+        # 💡 提示词也做了深度精简，仅用短小精悍的说明教大模型认清量纲即可，完全不占 token
+        system_prompt = (
+            "你是一个知识库助手。根据提供的上下文回答问题。\n"
+            "【分数语义说明】：\n"
+            "- rerank_compressed_score: 二阶段精排置信度(0~1，越接近1越相关)\n"
+            "- rrf_position_score: 多通道粗排融合位置分\n"
+            "- vector_similarity: 纯向量空间几何相似度\n"
+            "- neighbor_boost_score: 邻居切块拓扑扩展分\n\n"
+            "优先参考包含强精排证据（如含有 raw_rerank_logit 或高 rerank_compressed_score）的上下文。"
+            "回答时引用来源文件名，并尽量在正文关键要点后保留分值线索。如果上下文中没有相关信息，明确说明你不知道。"
+        )
+
         return [
             {
                 "role": "system",
-                "content": (
-                    "你是一个知识库助手。根据提供的上下文回答问题。"
-                    "优先参考每条证据中的 raw_scores、通道与来源信息。"
-                    "如果上下文中没有相关信息，明确说明你不知道。"
-                    "回答时引用来源文件名，并尽量保留证据链中的关键分值线索。"
-                ),
+                "content": system_prompt,
             },
             {
                 "role": "user",
