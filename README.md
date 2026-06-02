@@ -12,6 +12,7 @@
 - ⚡ **增量索引** — 基于文件 hash，跳过未变更文件
 - 💾 **本地向量库** — ChromaDB 持久化，零运维
 - 🧠 **知识图谱增强** — LLM 抽取三元组，NetworkX 图谱检索补召回
+- 🌐 **查询对齐助手** — 路由后、检索前做中英术语对齐与受控扩展，保留原 query 兜底
 
 ## 🏗️ 架构
 
@@ -144,6 +145,7 @@ Hybrid + Reranker        0.7234     0.7890      4.3       4.3       4.3
 - **增量索引**: 文件 MD5 hash 追踪，避免重复 API 调用
 - **KG 增强**: 抽取三元组并存储为 JSON，检索时从图谱召回关联 chunk
 - **意图路由**: 基于原型向量分类，低置信度回退到本地检索链路
+- **查询对齐助手**: 先经过 Intent Router，再在 Vector/BM25/KG 之前做中英术语对齐；若命中规则门控失败、长度过短、像代码/路径或 LLM 低置信度，则确定性回退到原始 query
 
 ## ⚙️ KG 配置
 
@@ -152,6 +154,10 @@ KG 相关参数已集中在 `.env` / `config.py`。需要时只修改 `USE_KG_EX
 ## 🧭 意图路由配置
 
 意图路由默认开启，参数集中在 `.env` / `config.py`。通常只需调整 `USE_INTENT_ROUTER`、`INTENT_ROUTER_*` 的阈值与全局模式。
+
+## 🌐 查询对齐配置
+
+查询对齐助手默认开启，参数集中在 `.env` / `config.py`。通常只需调整 `USE_QUERY_ALIGNER`、`QUERY_ALIGNER_*` 的阈值与扩展条数。它只在 Intent Router 之后、进入 Vector / BM25 / KG 之前运行。
 
 ## 📄 License
 

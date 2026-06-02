@@ -80,6 +80,39 @@ class TestRRFFusion:
         assert fused[0]["id"] == "b"
         assert "kg" in fused[0]["channels"]
 
+    def test_merge_candidates_preserves_channel_scores_and_metadata(self):
+        """同一文档跨通道命中时应保留各通道分值和元数据"""
+        vector = [
+            {
+                "id": "doc-1",
+                "text": "vector text",
+                "metadata": {"source": "notes/demo.md", "chunk_index": 1, "vector_tag": "v"},
+                "score": 0.91,
+            }
+        ]
+        bm25 = [
+            {
+                "id": "doc-1",
+                "text": "bm25 text",
+                "metadata": {"source": "notes/demo.md", "chunk_index": 1, "bm25_tag": "b"},
+                "score": 2.5,
+            }
+        ]
+
+        fused = self._weighted_rrf(
+            ("vector", vector),
+            ("bm25", bm25),
+            weights={"vector": 1.0, "bm25": 1.0},
+        )
+
+        item = fused[0]
+        assert item["id"] == "doc-1"
+        assert item["channel_scores"]["vector"] == 0.91
+        assert item["channel_scores"]["bm25"] == 2.5
+        assert item["metadata"]["vector_tag"] == "v"
+        assert item["metadata"]["bm25_tag"] == "b"
+        assert set(item["metadata"]["channel_metadata"]) == {"vector", "bm25"}
+
 
 class TestNeighborExpansion:
     def test_expand_neighbor_chunks_uses_chunk_index_and_source(self):
@@ -106,6 +139,17 @@ class TestNeighborExpansion:
         expanded = Retriever._expand_neighbor_chunks(retriever, seeds, window=2, budget=1)
 
         assert len(expanded) == 1
+
+    def test_sort_local_contexts_orders_chunks_within_same_source(self):
+        contexts = [
+            {"text": "chunk 2", "metadata": {"source": "notes/demo.md", "chunk_index": 2}, "score": 0.2},
+            {"text": "other source", "metadata": {"source": "notes/other.md", "chunk_index": 0}, "score": 0.3},
+            {"text": "chunk 1", "metadata": {"source": "notes/demo.md", "chunk_index": 1}, "score": 0.4},
+        ]
+
+        sorted_contexts = Retriever._sort_local_contexts(contexts)
+
+        assert [item["text"] for item in sorted_contexts] == ["chunk 1", "chunk 2", "other source"]
 
 
 class _FakeCollection:

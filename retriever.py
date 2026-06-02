@@ -14,6 +14,7 @@ from openai import OpenAI
 from embedder import ZhipuEmbedder
 from kg_retriever import KGRetriever
 from intent_router import IntentRouter
+from query_aligner import QueryAligner, QueryAlignmentResult
 from metrics import Timer
 import config
 from typing import Optional
@@ -51,6 +52,11 @@ class Retriever:
         if self.use_intent_router:
             self.intent_router = IntentRouter(self.embedder)
 
+        # Query Aligner
+        self.use_query_aligner = config.USE_QUERY_ALIGNER
+        if self.use_query_aligner:
+            self.query_aligner = QueryAligner()
+
         self.summary_client = None
         if config.INTENT_ROUTER_GLOBAL_MODE == "summary":
             self.summary_client = OpenAI(
@@ -60,6 +66,16 @@ class Retriever:
 
         # 上次检索的分步耗时 (供可观测性使用)
         self.last_timing = {}
+
+    def _align_query(self, query: str) -> tuple[str, QueryAlignmentResult | None]:
+        if not self.use_query_aligner:
+            return query, None
+
+        with Timer() as t_align:
+            alignment = self.query_aligner.align(query)
+        self.last_timing["align_ms"] = t_align.elapsed_ms
+        self.last_timing["query_alignment"] = alignment.to_dict()
+        return alignment.search_query, alignment
 
     def _build_bm25_index(self):
         """从 ChromaDB 加载全部文档，构建 BM25 索引"""
@@ -165,6 +181,28 @@ class Retriever:
         return "_".join(parts) + f"_{chunk_index}"
 
     @staticmethod
+    def _merge_metadata(*metadata_items: dict | None) -> dict:
+        merged: dict = {}
+        channel_metadata: dict[str, dict] = {}
+
+        for index, metadata in enumerate(metadata_items):
+            if not metadata:
+                continue
+            channel_name = metadata.get("channel") if isinstance(metadata, dict) else None
+            if channel_name is None:
+                channel_name = f"channel_{index}"
+            channel_metadata[channel_name] = dict(metadata)
+            for key, value in metadata.items():
+                if key == "channel":
+                    continue
+                if key not in merged:
+                    merged[key] = value
+
+        if channel_metadata:
+            merged["channel_metadata"] = channel_metadata
+        return merged
+
+    @staticmethod
     def _merge_candidates(
         *scored_lists: tuple[str, list[dict]],
         k: int = 60,
@@ -174,12 +212,16 @@ class Retriever:
         fused_scores: dict[str, float] = defaultdict(float)
         doc_map: dict[str, dict] = {}
         channel_hits: dict[str, set[str]] = defaultdict(set)
+        channel_scores: dict[str, dict[str, float]] = defaultdict(dict)
+        channel_metadata: dict[str, dict[str, dict]] = defaultdict(dict)
 
         for channel, results in scored_lists:
             channel_weight = weights.get(channel, 1.0)
             for rank, item in enumerate(results):
                 doc_id = item["id"]
                 fused_scores[doc_id] += channel_weight / (k + rank + 1)
+                channel_scores[doc_id][channel] = float(item.get("score", 0.0))
+                channel_metadata[doc_id][channel] = dict(item.get("metadata") or {})
                 if doc_id not in doc_map or item["score"] > doc_map[doc_id].get("score", float("-inf")):
                     doc_map[doc_id] = item
                 channel_hits[doc_id].add(channel)
@@ -187,8 +229,15 @@ class Retriever:
         merged: list[dict] = []
         for doc_id, score in fused_scores.items():
             item = dict(doc_map[doc_id])
+            item["metadata"] = Retriever._merge_metadata(
+                *[
+                    {**metadata, "channel": channel}
+                    for channel, metadata in channel_metadata[doc_id].items()
+                ]
+            )
             item["score"] = score
             item["channels"] = sorted(channel_hits[doc_id])
+            item["channel_scores"] = dict(channel_scores[doc_id])
             merged.append(item)
         return sorted(merged, key=lambda x: x["score"], reverse=True)
 
@@ -252,6 +301,40 @@ class Retriever:
                 }
             )
         return expanded
+
+    @staticmethod
+    def _sort_local_contexts(contexts: list[dict]) -> list[dict]:
+        grouped: dict[str, list[tuple[int, int, dict]]] = {}
+        source_order: list[str] = []
+        passthrough: list[tuple[int, dict]] = []
+
+        for original_index, item in enumerate(contexts):
+            metadata = item.get("metadata") or {}
+            source = metadata.get("source")
+            chunk_index = metadata.get("chunk_index")
+            if source is None or chunk_index is None:
+                passthrough.append((original_index, item))
+                continue
+
+            if source not in grouped:
+                grouped[source] = []
+                source_order.append(source)
+
+            grouped[source].append((int(chunk_index), original_index, item))
+
+        sorted_contexts: list[dict] = []
+        for source in source_order:
+            sorted_contexts.extend(
+                item
+                for _, _, item in sorted(
+                    grouped[source], key=lambda value: (value[0], value[1])
+                )
+            )
+
+        sorted_contexts.extend(
+            item for _, item in sorted(passthrough, key=lambda value: value[0])
+        )
+        return sorted_contexts
 
     def _global_retrieve(
         self,
@@ -380,10 +463,13 @@ class Retriever:
             route, route_info = self.intent_router.route(query)
             self.last_timing["route"] = route
             self.last_timing["route_info"] = route_info
+
             if route == "global":
+                aligned_query, _alignment = self._align_query(query)
+                self.last_timing["aligned_query"] = aligned_query
                 with Timer() as t_embed:
                     candidates = self._global_retrieve(
-                        query,
+                        aligned_query,
                         top_k=config.INTENT_ROUTER_GLOBAL_TOP_K,
                         max_sources=config.INTENT_ROUTER_GLOBAL_MAX_SOURCES,
                         max_chars=config.INTENT_ROUTER_GLOBAL_MAX_CHARS,
@@ -396,16 +482,19 @@ class Retriever:
                     for c in candidates
                 ]
 
+        aligned_query, _alignment = self._align_query(query)
+        self.last_timing["aligned_query"] = aligned_query
+
         if mode == "auto":
             mode = "hybrid" if self.use_hybrid else "vector"
 
         # ── Embedding + 检索 ──
         with Timer() as t_embed:
             if mode == "bm25":
-                candidates = self._bm25_search(query, top_k)
+                candidates = self._bm25_search(aligned_query, top_k)
             elif mode == "hybrid":
-                vector_results = self._vector_search(query, top_k)
-                bm25_results = self._bm25_search(query, top_k)
+                vector_results = self._vector_search(aligned_query, top_k)
+                bm25_results = self._bm25_search(aligned_query, top_k)
                 candidates = self._merge_candidates(
                     ("vector", vector_results),
                     ("bm25", bm25_results),
@@ -416,14 +505,14 @@ class Retriever:
                     },
                 )
             else:  # vector
-                candidates = self._vector_search(query, top_k)
+                candidates = self._vector_search(aligned_query, top_k)
 
         self.last_timing["embed_ms"] = t_embed.elapsed_ms
 
         if self.use_kg:
             base_count = len(candidates)
             with Timer() as t_kg:
-                kg_candidates = self._kg_search(query, config.KG_TOP_K)
+                kg_candidates = self._kg_search(aligned_query, config.KG_TOP_K)
             self.last_timing["kg_ms"] = t_kg.elapsed_ms
             if kg_candidates:
                 candidates = self._merge_candidates(
@@ -450,7 +539,7 @@ class Retriever:
 
         if use_rerank and self.use_reranker and seed_candidates:
             with Timer() as t_rerank:
-                pairs = [[query, c["text"]] for c in seed_candidates]
+                pairs = [[aligned_query, c["text"]] for c in seed_candidates]
                 scores = self.reranker.predict(pairs)
                 for c, s in zip(seed_candidates, scores):
                     c["score"] = float(s)
@@ -474,6 +563,7 @@ class Retriever:
         self.last_timing["mode"] = mode
 
         # 去掉内部 id 字段再返回
+        candidates = self._sort_local_contexts(candidates)
         return [
             {"text": c["text"], "metadata": c["metadata"], "score": c["score"]}
             for c in candidates

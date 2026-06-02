@@ -73,6 +73,14 @@ INTENT_ROUTER_GLOBAL_SUMMARY_MAX_TOKENS = int(
     os.getenv("INTENT_ROUTER_GLOBAL_SUMMARY_MAX_TOKENS", "800")
 )
 
+# ── Query Aligner 配置 ────────────────────────────────────
+USE_QUERY_ALIGNER = os.getenv("USE_QUERY_ALIGNER", "true").lower() == "true"
+QUERY_ALIGNER_MODEL = os.getenv("QUERY_ALIGNER_MODEL", LLM_MODEL)
+QUERY_ALIGNER_MIN_QUERY_LENGTH = int(os.getenv("QUERY_ALIGNER_MIN_QUERY_LENGTH", "4"))
+QUERY_ALIGNER_MIN_CONFIDENCE = float(os.getenv("QUERY_ALIGNER_MIN_CONFIDENCE", "0.55"))
+QUERY_ALIGNER_MAX_EXPANSIONS = int(os.getenv("QUERY_ALIGNER_MAX_EXPANSIONS", "4"))
+QUERY_ALIGNER_MAX_TERMS = int(os.getenv("QUERY_ALIGNER_MAX_TERMS", "6"))
+
 # ── Data Pipeline 配置 ────────────────────────────────────
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "512"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "64"))
