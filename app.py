@@ -335,7 +335,7 @@ def _build_source_block(contexts: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _build_trace_block(last_timing: dict) -> str:
+def _build_trace_block(last_timing: dict, history_turns: int = 0) -> str:
     route_decision = str(
         last_timing.get("route_decision")
         or last_timing.get("route")
@@ -346,6 +346,12 @@ def _build_trace_block(last_timing: dict) -> str:
         "global": "Global",
         "local": "Local",
     }.get(route_decision.lower(), route_decision.title() if route_decision else "Unknown")
+    
+    rewrite_triggered = bool(last_timing.get("rewrite_triggered", False))
+    rewrite_ms = float(last_timing.get("rewrite_ms", 0.0) or 0.0)
+    original_query = str(last_timing.get("original_query") or "").strip()
+    rewritten_query = str(last_timing.get("rewritten_query") or "").strip()
+    
     align_triggered = bool(last_timing.get("align_triggered", False))
     rerank_active = bool(last_timing.get("rerank_active", False))
     align_ms = float(last_timing.get("align_ms", 0.0) or 0.0)
@@ -363,15 +369,29 @@ def _build_trace_block(last_timing: dict) -> str:
     aligned_query_line = (
         f"<div><strong>对齐后查询</strong>: {aligned_query}</div>" if aligned_query else ""
     )
+    history_line = (
+        f"<div><strong>历史轮数</strong>: {history_turns} 轮已注入</div>"
+        if history_turns > 0
+        else "<div><strong>历史轮数</strong>: 未注入（首轮或已禁用）</div>"
+    )
+    
+    rewrite_line = (
+        f"<div><strong>多轮重写</strong>: {'✅ 已触发' if rewrite_triggered else '⏭️ 未触发'}</div>"
+        f"{(f'<div><strong>重写前查询</strong>: {original_query}</div>' if rewrite_triggered else '')}"
+        f"{(f'<div><strong>重写后查询</strong>: {rewritten_query}</div>' if rewrite_triggered else '')}"
+    )
 
     return (
         "<details><summary>🔍 检索管线执行详情 (Trace)</summary>"
         "<div style=\"margin-top:0.6em;padding:0 4px\">"
+        f"{history_line}"
+        f"{rewrite_line}"
         f"<div><strong>意图路由</strong>: {route_label}</div>"
         f"<div><strong>前置对齐</strong>: {'✅ 已触发' if align_triggered else '⏭️ 未触发'}</div>"
         f"<div><strong>对齐扩展词</strong>: {expansion_text}</div>"
         f"{aligned_query_line}"
         f"<div><strong>精排介入</strong>: {'✅ 已触发' if rerank_active else '⏭️ 未触发'}</div>"
+        f"<div><strong>重写耗时</strong>: {rewrite_ms:.1f} ms</div>"
         f"<div><strong>对齐耗时</strong>: {align_ms:.1f} ms</div>"
         f"<div><strong>精排耗时</strong>: {rerank_ms:.1f} ms</div>"
         f"<div><strong>纯检索耗时</strong>: {pure_search_ms:.1f} ms</div>"
@@ -379,10 +399,15 @@ def _build_trace_block(last_timing: dict) -> str:
     )
 
 
-def _build_final_assistant_content(answer: str, contexts: list[dict], last_timing: dict) -> str:
+def _build_final_assistant_content(
+    answer: str,
+    contexts: list[dict],
+    last_timing: dict,
+    history_turns: int = 0,
+) -> str:
     sections = [answer]
     sections.append(_build_source_block(contexts))
-    sections.append(_build_trace_block(last_timing))
+    sections.append(_build_trace_block(last_timing, history_turns))
     return "\n\n".join(section for section in sections if section)
 
 
@@ -395,12 +420,19 @@ def chat(message: str, history: list | None):
     # 检索
     try:
         with Timer() as t_retrieve:
-            contexts = retriever.retrieve(message)
+            contexts = retriever.retrieve(message, history=history)
     except Exception as e:
         logger.error("检索失败: %s", e)
         error_content = _build_final_assistant_content(f"⚠️ 检索出错: {e}", [], retriever.last_timing)
         yield base_history + [{"role": "assistant", "content": error_content}]
         return
+
+    # 计算实际注入的历史轮数（取有效 user+assistant 对，上限 LLM_HISTORY_TURNS）
+    _valid_history = [
+        m for m in history
+        if isinstance(m, dict) and m.get("role") in ("user", "assistant")
+    ]
+    history_turns_injected = min(len(_valid_history) // 2, config.LLM_HISTORY_TURNS)
 
     # 流式生成（批量累积后 yield，减少渲染频率）
     answer = ""
@@ -409,7 +441,7 @@ def chat(message: str, history: list | None):
     generate_ms = 0.0
     try:
         with Timer() as t_gen:
-            for token in generator.generate_stream(message, contexts):
+            for token in generator.generate_stream(message, contexts, history=history):
                 answer += token
                 char_buf += len(token)
                 if char_buf >= _STREAM_BATCH:
@@ -446,9 +478,13 @@ def chat(message: str, history: list | None):
     # 最终回复
     if generate_error is not None:
         error_msg = answer + f"\n\n⚠️ 生成中断: {generate_error}" if answer else f"⚠️ 生成出错: {generate_error}"
-        final_content = _build_final_assistant_content(error_msg, contexts, retriever.last_timing)
+        final_content = _build_final_assistant_content(
+            error_msg, contexts, retriever.last_timing, history_turns_injected
+        )
     else:
-        final_content = _build_final_assistant_content(answer, contexts, retriever.last_timing)
+        final_content = _build_final_assistant_content(
+            answer, contexts, retriever.last_timing, history_turns_injected
+        )
 
     yield base_history + [{"role": "assistant", "content": final_content}]
 

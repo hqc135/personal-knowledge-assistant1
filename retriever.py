@@ -16,6 +16,7 @@ from embedder import ZhipuEmbedder
 from kg_retriever import KGRetriever
 from intent_router import IntentRouter
 from query_aligner import QueryAligner, QueryAlignmentResult
+from query_rewriter import QueryRewriter
 from metrics import Timer
 import config
 from typing import Optional
@@ -57,6 +58,11 @@ class Retriever:
         self.use_query_aligner = config.USE_QUERY_ALIGNER
         if self.use_query_aligner:
             self.query_aligner = QueryAligner()
+            
+        # Query Rewriter
+        self.use_query_rewriter = config.USE_QUERY_REWRITER
+        if self.use_query_rewriter:
+            self.query_rewriter = QueryRewriter()
 
         self.summary_client = None
         if config.INTENT_ROUTER_GLOBAL_MODE == "summary":
@@ -460,23 +466,38 @@ class Retriever:
         use_rerank: Optional[bool] = None,
         top_k: Optional[int] = None,
         final_k: Optional[int] = None,
+        history: Optional[list[dict]] = None,
     ) -> list[dict]:
         """
         检索入口。
         mode: "auto"(按配置), "vector", "bm25", "hybrid"
         use_rerank: 覆盖配置的 reranker 开关 (用于消融实验)
+        history: 多轮对话历史，用于查询重写和指代消解
         """
         top_k = top_k or config.RETRIEVER_RECALL_TOP_K
         final_k = final_k or config.RETRIEVER_FINAL_K
         if use_rerank is None:
             use_rerank = self.use_reranker
         self.last_timing = {
+            "rewrite_ms": 0.0,
             "align_ms": 0.0,
             "rerank_ms": 0.0,
             "route_decision": "local",
             "align_triggered": False,
             "rerank_active": False,
+            "rewrite_triggered": False,
         }
+
+        # ── 0. 查询重写 (指代消解) ──
+        if self.use_query_rewriter and history:
+            with Timer() as t_rewrite:
+                rewritten_query = self.query_rewriter.rewrite(query, history)
+            self.last_timing["rewrite_ms"] = t_rewrite.elapsed_ms
+            if rewritten_query != query:
+                self.last_timing["rewrite_triggered"] = True
+                self.last_timing["original_query"] = query
+                self.last_timing["rewritten_query"] = rewritten_query
+                query = rewritten_query
 
         if mode == "auto" and self.use_intent_router:
             route, route_info = self.intent_router.route(query)

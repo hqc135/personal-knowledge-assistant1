@@ -1,11 +1,15 @@
 import logging
-import time
+import re
 from typing import Generator as GenType
 
 from openai import OpenAI
 import config
 
 logger = logging.getLogger(__name__)
+
+# 匹配参考来源块（"---\n📎 **参考来源**" 及其后内容）和 Trace 块（<details>...</details>）
+_RE_SOURCE_BLOCK = re.compile(r"\n*---\n📎 \*\*参考来源\*\*.*", re.DOTALL)
+_RE_TRACE_BLOCK = re.compile(r"\n*<details>.*?</details>", re.DOTALL)
 
 
 class Generator:
@@ -15,6 +19,18 @@ class Generator:
             base_url=config.LLM_BASE_URL,
         )
         self.model = config.LLM_MODEL
+
+    @staticmethod
+    def _clean_assistant_content(content: str) -> str:
+        """
+        从 assistant 历史消息中剥离 UI 专用装饰块：
+        - 参考来源块（"---\\n📎 **参考来源**" 起至末尾）
+        - Trace 折叠块（<details>…</details>）
+        保留纯回答文本，避免把调试信息污染后续对话上下文。
+        """
+        text = _RE_SOURCE_BLOCK.sub("", content)
+        text = _RE_TRACE_BLOCK.sub("", text)
+        return text.rstrip()
 
     @staticmethod
     def _format_evidence_chain(context: dict) -> str:
@@ -58,8 +74,20 @@ class Generator:
         lines.append(context.get("text", ""))
         return "\n".join(lines)
 
-    def _build_messages(self, query: str, contexts: list[dict]) -> list[dict]:
-        """构建 LLM 消息列表"""
+    def _build_messages(
+        self,
+        query: str,
+        contexts: list[dict],
+        history: list[dict] | None = None,
+    ) -> list[dict]:
+        """
+        构建 LLM 消息列表。
+
+        history 格式：Gradio messages 格式，每条形如
+          {"role": "user"|"assistant", "content": "..."}
+        取最近 config.LLM_HISTORY_TURNS 轮（每轮 = 1 user + 1 assistant），
+        assistant 消息会先经 _clean_assistant_content 剥离 UI 装饰块。
+        """
         context_text = "\n\n---\n\n".join(
             self._format_evidence_chain(c)
             for c in contexts
@@ -78,20 +106,43 @@ class Generator:
             "回答时引用来源文件名，并尽量在正文关键要点后保留分值线索。如果上下文中没有相关信息，明确说明你不知道。"
         )
 
-        return [
-            {
-                "role": "system",
-                "content": system_prompt,
-            },
+        messages: list[dict] = [{"role": "system", "content": system_prompt}]
+
+        # ── 注入历史轮次 ──────────────────────────────────────
+        max_turns = config.LLM_HISTORY_TURNS
+        if max_turns > 0 and history:
+            # 只保留 role in {user, assistant} 的消息，跳过其他（如 system）
+            valid = [
+                m for m in history
+                if isinstance(m, dict) and m.get("role") in ("user", "assistant")
+            ]
+            # 取最近 max_turns 轮（= 2*max_turns 条消息）
+            recent = valid[-(max_turns * 2):]
+            for msg in recent:
+                role = msg["role"]
+                content = str(msg.get("content") or "")
+                if role == "assistant":
+                    content = self._clean_assistant_content(content)
+                if content.strip():
+                    messages.append({"role": role, "content": content})
+
+        # ── 当前 user 消息（附带检索上下文） ──────────────────
+        messages.append(
             {
                 "role": "user",
                 "content": f"上下文证据链:\n{context_text}\n\n问题: {query}",
-            },
-        ]
+            }
+        )
+        return messages
 
-    def generate(self, query: str, contexts: list[dict]) -> str:
+    def generate(
+        self,
+        query: str,
+        contexts: list[dict],
+        history: list[dict] | None = None,
+    ) -> str:
         """阻塞式生成完整回答"""
-        messages = self._build_messages(query, contexts)
+        messages = self._build_messages(query, contexts, history)
 
         try:
             response = self.client.chat.completions.create(
@@ -105,9 +156,14 @@ class Generator:
             logger.error("LLM 生成失败: %s", e)
             raise
 
-    def generate_stream(self, query: str, contexts: list[dict]) -> GenType[str, None, None]:
+    def generate_stream(
+        self,
+        query: str,
+        contexts: list[dict],
+        history: list[dict] | None = None,
+    ) -> GenType[str, None, None]:
         """流式生成回答，逐 token yield"""
-        messages = self._build_messages(query, contexts)
+        messages = self._build_messages(query, contexts, history)
 
         try:
             stream = self.client.chat.completions.create(

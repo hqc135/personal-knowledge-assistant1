@@ -35,6 +35,8 @@ LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v4-flash")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com")
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
+# 多轮对话：注入给 LLM 的历史轮数上限（每轮 = 1 user + 1 assistant）；设为 0 禁用
+LLM_HISTORY_TURNS = int(os.getenv("LLM_HISTORY_TURNS", "3"))
 
 # ── Retriever 配置 ────────────────────────────────────────
 RETRIEVER_TOP_K = int(os.getenv("RETRIEVER_TOP_K", "5"))
@@ -80,6 +82,10 @@ QUERY_ALIGNER_MIN_QUERY_LENGTH = int(os.getenv("QUERY_ALIGNER_MIN_QUERY_LENGTH",
 QUERY_ALIGNER_MIN_CONFIDENCE = float(os.getenv("QUERY_ALIGNER_MIN_CONFIDENCE", "0.55"))
 QUERY_ALIGNER_MAX_EXPANSIONS = int(os.getenv("QUERY_ALIGNER_MAX_EXPANSIONS", "4"))
 QUERY_ALIGNER_MAX_TERMS = int(os.getenv("QUERY_ALIGNER_MAX_TERMS", "6"))
+
+# ── Query Rewriter 配置 ───────────────────────────────────
+USE_QUERY_REWRITER = os.getenv("USE_QUERY_REWRITER", "true").lower() == "true"
+QUERY_REWRITER_MODEL = os.getenv("QUERY_REWRITER_MODEL", LLM_MODEL)
 
 # ── Data Pipeline 配置 ────────────────────────────────────
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "512"))
