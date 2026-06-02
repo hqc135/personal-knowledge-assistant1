@@ -16,6 +16,20 @@ class QueryRewriter:
         )
         self.model = config.QUERY_REWRITER_MODEL
 
+    def _extract_text(self, raw_content) -> str:
+        """从可能带有 Gradio 多模态封装的格式中安全提取纯文本内容"""
+        if isinstance(raw_content, str):
+            return raw_content
+        elif isinstance(raw_content, list):
+            # 处理 [{"text": "...", "type": "text"}] 等格式
+            return "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in raw_content
+            )
+        elif isinstance(raw_content, tuple):
+            return str(raw_content[0])
+        return str(raw_content or "")
+
     def _clean_content(self, content: str) -> str:
         text = _RE_SOURCE_BLOCK.sub("", content)
         text = _RE_TRACE_BLOCK.sub("", text)
@@ -47,7 +61,7 @@ class QueryRewriter:
         history_text = ""
         for msg in recent:
             role = "用户" if msg["role"] == "user" else "助手"
-            content = str(msg.get("content") or "")
+            content = self._extract_text(msg.get("content"))
             if msg["role"] == "assistant":
                 content = self._clean_content(content)
             if content.strip():

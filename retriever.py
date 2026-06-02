@@ -21,10 +21,34 @@ from metrics import Timer
 import config
 from typing import Optional
 
+import threading
+from collections import OrderedDict
+
 logger = logging.getLogger(__name__)
 
 # 降低 jieba 日志级别
 jieba.setLogLevel(logging.WARNING)
+
+class ThreadSafeLRUCache:
+    """线程安全的 LRU 缓存，用于拦截高频 (Query, Chunk) 的重排分数"""
+    def __init__(self, capacity: int = 10000):
+        self.capacity = capacity
+        self.cache = OrderedDict()
+        self.lock = threading.Lock()
+
+    def get(self, key):
+        with self.lock:
+            if key not in self.cache:
+                return None
+            self.cache.move_to_end(key)
+            return self.cache[key]
+
+    def put(self, key, value):
+        with self.lock:
+            self.cache[key] = value
+            self.cache.move_to_end(key)
+            if len(self.cache) > self.capacity:
+                self.cache.popitem(last=False)
 
 
 class Retriever:
@@ -38,6 +62,7 @@ class Retriever:
         if self.use_reranker:
             logger.info("加载 Reranker: %s", config.RERANKER_MODEL)
             self.reranker = CrossEncoder(config.RERANKER_MODEL, max_length=512)
+            self.rerank_cache = ThreadSafeLRUCache(capacity=10000)
 
         # BM25 索引 (混合检索)
         self.use_hybrid = config.USE_HYBRID_SEARCH
@@ -589,12 +614,38 @@ class Retriever:
 
         if use_rerank and self.use_reranker and seed_candidates:
             with Timer() as t_rerank:
-                pairs = [[aligned_query, c["text"]] for c in seed_candidates]
-                scores = self.reranker.predict(pairs)
+                scores = [None] * len(seed_candidates)
+                uncached_pairs = []
+                uncached_indices = []
+
+                # 1. 查询缓存 (LRU Cache拦截)
+                for i, c in enumerate(seed_candidates):
+                    doc_id = c["id"]
+                    cached_score = self.rerank_cache.get((aligned_query, doc_id))
+                    if cached_score is not None:
+                        scores[i] = cached_score
+                    else:
+                        uncached_pairs.append([aligned_query, c["text"]])
+                        uncached_indices.append(i)
+
+                # 2. 对未命中缓存的候选块进行矩阵式批量推理 (Batching)
+                if uncached_pairs:
+                    batch_size = getattr(config, "RERANKER_BATCH_SIZE", 32)
+                    batch_scores = self.reranker.predict(uncached_pairs, batch_size=batch_size)
+                    
+                    if isinstance(batch_scores, float) or np.isscalar(batch_scores):
+                        batch_scores = [batch_scores]
+                        
+                    for idx, score in zip(uncached_indices, batch_scores):
+                        scores[idx] = float(score)
+                        self.rerank_cache.put((aligned_query, seed_candidates[idx]["id"]), float(score))
+
+                # 3. 汇总与映射分数
                 for c, s in zip(seed_candidates, scores):
                     c.setdefault("metadata", {})["raw_rerank_logit"] = float(s)
                     c["metadata"]["score_type"] = "rerank_compressed_score"
                     c["score"] = float(1 / (1 + np.exp(-s)))
+                
                 seed_candidates.sort(key=lambda x: x["score"], reverse=True)
             rerank_ms = t_rerank.elapsed_ms
             self.last_timing["rerank_active"] = True

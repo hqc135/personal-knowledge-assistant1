@@ -21,6 +21,21 @@ class Generator:
         self.model = config.LLM_MODEL
 
     @staticmethod
+    def _extract_text(raw_content) -> str:
+        """从可能带有 Gradio 多模态封装的格式中安全提取纯文本内容"""
+        if isinstance(raw_content, str):
+            return raw_content
+        elif isinstance(raw_content, list):
+            # 处理 [{"text": "...", "type": "text"}] 等格式
+            return "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in raw_content
+            )
+        elif isinstance(raw_content, tuple):
+            return str(raw_content[0])
+        return str(raw_content or "")
+
+    @staticmethod
     def _clean_assistant_content(content: str) -> str:
         """
         从 assistant 历史消息中剥离 UI 专用装饰块：
@@ -120,7 +135,7 @@ class Generator:
             recent = valid[-(max_turns * 2):]
             for msg in recent:
                 role = msg["role"]
-                content = str(msg.get("content") or "")
+                content = self._extract_text(msg.get("content"))
                 if role == "assistant":
                     content = self._clean_assistant_content(content)
                 if content.strip():

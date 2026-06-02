@@ -10,6 +10,7 @@ from retriever import Retriever
 from generator import Generator
 from metrics import Timer, RequestMetrics, collector
 from logger import setup_logging
+import config
 
 # ── 初始化 ───────────────────────────────────────────────
 

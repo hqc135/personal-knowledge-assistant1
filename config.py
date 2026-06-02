@@ -49,6 +49,7 @@ RETRIEVER_WEIGHT_BM25 = float(os.getenv("RETRIEVER_WEIGHT_BM25", "0.35"))
 RETRIEVER_WEIGHT_KG = float(os.getenv("RETRIEVER_WEIGHT_KG", "0.20"))
 RETRIEVER_WEIGHT_NEIGHBOR = float(os.getenv("RETRIEVER_WEIGHT_NEIGHBOR", "0.10"))
 RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+RERANKER_BATCH_SIZE = int(os.getenv("RERANKER_BATCH_SIZE", "32"))
 USE_RERANKER = os.getenv("USE_RERANKER", "true").lower() == "true"
 
 # ── Intent Router 配置 ────────────────────────────────────
