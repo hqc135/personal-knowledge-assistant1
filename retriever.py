@@ -99,6 +99,33 @@ class Retriever:
         # 上次检索的分步耗时 (供可观测性使用)
         self.last_timing = {}
 
+        # ── 启动后台预热线程，解耦生命周期 ──
+        import threading
+        threading.Thread(target=self._warmup, daemon=True).start()
+
+    def _warmup(self):
+        """后台预热，避免阻塞主线程启动，提前建立所有必要缓存和连接"""
+        logger.info("后台预热线程已启动...")
+        try:
+            # 1. 预热 jieba 分词
+            jieba.initialize()
+            
+            # 2. 预热 Reranker 模型推理 (触发 PyTorch/CUDA 初始化耗时)
+            if getattr(self, "use_reranker", False) and hasattr(self, "reranker"):
+                self.reranker.predict([["预热", "测试"]])
+                
+            # 3. 预热 ChromaDB 向量查询连接
+            dummy_embedding = [0.0] * config.EMBEDDING_DIMENSIONS
+            self.collection.query(query_embeddings=[dummy_embedding], n_results=1)
+            
+            # 4. 预热 KG 实体向量索引 (这是首问最严重的耗时点)
+            if getattr(self, "use_kg", False) and hasattr(self, "kg"):
+                self.kg._get_entity_vector_index()
+                
+            logger.info("后台预热全部完成！首次查询将极速响应。")
+        except Exception as e:
+            logger.warning("后台预热过程出现异常，但不影响正常运行: %s", e)
+
     def _align_query(self, query: str) -> tuple[str, QueryAlignmentResult | None]:
         if not self.use_query_aligner:
             return query, None

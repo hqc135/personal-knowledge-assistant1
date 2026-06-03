@@ -36,6 +36,7 @@ def test_retriever_calls_intent_router_before_query_aligner(monkeypatch):
     retriever = Retriever.__new__(Retriever)
     retriever.use_intent_router = True
     retriever.use_query_aligner = True
+    retriever.use_query_rewriter = False
     retriever.use_hybrid = False
     retriever.use_kg = False
     retriever.use_reranker = False

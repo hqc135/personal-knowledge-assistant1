@@ -155,10 +155,10 @@ def extract_triples(text: str, *, source: str, chunk_id: str) -> list[dict]:
     fallback_model = config.KG_FALLBACK_MODEL
     last_error: Exception | None = None
 
+    data = None
     for attempt in range(1, 4):
         try:
             request_kwargs = _request_kwargs(model=model, use_response_format=use_response_format, prompt=prompt)
-            response = client.chat.completions.create(**request_kwargs)
             response = client.chat.completions.create(**request_kwargs)
             message = response.choices[0].message
             content = message.content or ""
@@ -203,7 +203,7 @@ def extract_triples(text: str, *, source: str, chunk_id: str) -> list[dict]:
                     raise ValueError("empty model response")
 
             # 如果上面没有通过 follow-up 填充 data，则在这里解析 content
-            if 'data' not in locals():
+            if data is None:
                 data = _extract_json(content)
 
             if isinstance(data, dict) and "triples" in data:

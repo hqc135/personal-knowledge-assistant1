@@ -71,6 +71,8 @@ class QueryAligner:
         self.client = client or OpenAI(
             api_key=config.DEEPSEEK_API_KEY,
             base_url=config.LLM_BASE_URL,
+            timeout=15.0,
+            max_retries=1,
         )
         self.model = model or config.QUERY_ALIGNER_MODEL
         self.min_query_length = (
@@ -228,8 +230,25 @@ class QueryAligner:
                 temperature=0.0,
                 max_tokens=500,
             )
-            content = response.choices[0].message.content or ""
-            payload = self._extract_json(content)
+            message = response.choices[0].message
+            content = message.content or ""
+
+            # DeepSeek 推理模型可能返回空 content + reasoning_content
+            if not content.strip():
+                reasoning = getattr(message, "reasoning_content", None)
+                if reasoning:
+                    logger.info("QueryAligner 收到 reasoning-only 响应，尝试从推理内容提取")
+                    # 尝试从 reasoning_content 中提取 JSON
+                    try:
+                        payload = self._extract_json(reasoning)
+                    except Exception:
+                        logger.warning("QueryAligner reasoning 内容无法解析为 JSON，回退")
+                        return self._fallback(query, "reasoning_only_no_json", language)
+                else:
+                    logger.warning("QueryAligner 收到空响应，回退")
+                    return self._fallback(query, "empty_response", language)
+            else:
+                payload = self._extract_json(content)
         except Exception as exc:
             logger.warning("QueryAligner 失败，回退到原查询: %s", exc)
             return self._fallback(query, "llm_error", language)

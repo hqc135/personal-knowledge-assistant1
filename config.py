@@ -89,11 +89,24 @@ USE_QUERY_REWRITER = os.getenv("USE_QUERY_REWRITER", "true").lower() == "true"
 QUERY_REWRITER_MODEL = os.getenv("QUERY_REWRITER_MODEL", LLM_MODEL)
 
 # ── Data Pipeline 配置 ────────────────────────────────────
+# fallback 字符切块（仅在语义分块关闭或异常降级时使用）
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "512"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "64"))
 CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_db")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "my_knowledge_base")
 NOTES_DIR = os.getenv("NOTES_DIR", "./notes")
+
+# ── Semantic Chunker 配置 ─────────────────────────────────
+# 总开关；设为 false 则回退至旧的 RecursiveCharacterTextSplitter
+SEMANTIC_CHUNKER_ENABLED = os.getenv("SEMANTIC_CHUNKER_ENABLED", "true").lower() == "true"
+# 百分位阈值：相似度低于第 N 百分位的相邻句对被视为语义断点（越高 → 切点越少）
+SEMANTIC_BREAKPOINT_PERCENTILE = float(os.getenv("SEMANTIC_BREAKPOINT_PERCENTILE", "85"))
+# 滑动平均窗口大小：对句向量做局部平滑，降低单句噪声影响
+SEMANTIC_WINDOW_SIZE = int(os.getenv("SEMANTIC_WINDOW_SIZE", "2"))
+# chunk 字符下限：产出的 chunk 若小于此值，向前合并以避免碎片
+SEMANTIC_MIN_CHUNK_SIZE = int(os.getenv("SEMANTIC_MIN_CHUNK_SIZE", "80"))
+# chunk 字符上限：超过此值时对该 chunk 按句子二分强制硬切
+SEMANTIC_MAX_CHUNK_SIZE = int(os.getenv("SEMANTIC_MAX_CHUNK_SIZE", "1200"))
 
 # ── 混合检索 配置 ─────────────────────────────────────────
 USE_HYBRID_SEARCH = os.getenv("USE_HYBRID_SEARCH", "true").lower() == "true"
@@ -108,6 +121,7 @@ KG_SCORE_BASE = float(os.getenv("KG_SCORE_BASE", "0.4"))
 KG_MAX_TRIPLES_PER_CHUNK = int(os.getenv("KG_MAX_TRIPLES_PER_CHUNK", "8"))
 KG_LLM_MODEL = os.getenv("KG_LLM_MODEL", "deepseek-chat")
 KG_FALLBACK_MODEL = os.getenv("KG_FALLBACK_MODEL", "deepseek-chat")
+KG_EXTRACTION_WORKERS = int(os.getenv("KG_EXTRACTION_WORKERS", "4"))  # 三元组并发抽取线程数
 KG_ENTITY_VECTOR_TOP_K = int(os.getenv("KG_ENTITY_VECTOR_TOP_K", "5"))
 KG_ENTITY_VECTOR_MIN_SIM = float(os.getenv("KG_ENTITY_VECTOR_MIN_SIM", "0.35"))
 

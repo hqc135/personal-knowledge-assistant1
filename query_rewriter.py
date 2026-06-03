@@ -13,6 +13,8 @@ class QueryRewriter:
         self.client = OpenAI(
             api_key=config.DEEPSEEK_API_KEY,
             base_url=config.LLM_BASE_URL,
+            timeout=15.0,
+            max_retries=1,
         )
         self.model = config.QUERY_REWRITER_MODEL
 
@@ -86,8 +88,13 @@ class QueryRewriter:
                 temperature=0.0,
                 max_tokens=200,
             )
-            rewritten = (response.choices[0].message.content or "").strip()
+            message = response.choices[0].message
+            rewritten = (message.content or "").strip()
+            # DeepSeek 推理模型可能返回空 content + reasoning_content
             if not rewritten:
+                reasoning = getattr(message, "reasoning_content", None)
+                if reasoning:
+                    logger.info("查询重写收到 reasoning-only 响应，回退原查询")
                 return query
             
             # 清理可能的常见冗余前缀
