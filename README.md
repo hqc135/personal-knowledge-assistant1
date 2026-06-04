@@ -29,30 +29,34 @@ Intent Router (Global/Local) ─────► Retriever
 personal-knowledge-assistant/
 ├── chroma_db/             # ChromaDB 持久化目录
 ├── eval_reports/          # 消融实验报告
-├── notes/                  # Markdown 笔记（38 篇示例）
-├── tests/                  # 单元测试 (pytest)
-│   ├── test_data_pipeline.py
-│   ├── test_retriever.py
-│   ├── test_metrics.py
-│   └── test_embedder.py
-├── config.py               # 集中配置管理（从 .env 加载）
-├── logger.py               # 统一日志配置
-├── metrics.py              # 可观测性（计时 + 指标收集）
-├── embedder.py             # Embedding 模块（智谱 API + 重试）
-├── data_pipeline.py        # 数据处理 + 增量索引
-├── retriever.py            # 混合检索（Vector + BM25 + RRF + Rerank）
-├── intent_router.py        # 意图路由（原型向量分类）
-├── intent_prototypes.json  # 路由原型示例
-├── generator.py            # LLM 生成（阻塞 + 流式）
-├── kg_extractor.py         # LLM 三元组抽取
-├── kg_store.py             # 本地 JSON 三元组存储
-├── kg_retriever.py         # KG 检索（NetworkX）
-├── evaluator.py            # 评估（Embedding + LLM-as-Judge）
-├── ablation.py             # 消融实验脚本
-├── app.py                  # Gradio 应用（聊天 + 仪表盘）
-├── Dockerfile              # Docker 一键部署
-├── .env.example            # 环境变量模板
-├── kg_triples.json         # 知识图谱三元组（运行后生成）
+├── notes/                 # Markdown 笔记示例
+├── tests/                 # 单元测试 (pytest)
+├── core/                  # 核心模块层（数据契约与管线编排）
+│   ├── schemas.py         # PipelineTrace, RetrievalResult
+│   └── pipeline.py        # RAGPipeline 组装
+├── retrieval/             # 检索子组件层
+│   ├── factory.py         # Retriever 依赖注入工厂
+│   ├── bm25_index.py      # BM25 关键词检索封装
+│   ├── reranker.py        # CrossEncoder + LRU 缓存
+│   └── neighbor_expander.py # 邻居块扩展
+├── ui/                    # 表现视图层
+│   ├── theme.py           # Gradio 主题、CSS 和颜色常量
+│   ├── chat_view.py       # 聊天 Tab UI 及响应格式化
+│   └── dashboard_view.py  # 仪表盘 Tab UI 及纯 SVG 图表生成
+├── config.py              # 集中配置管理（从 .env 加载）
+├── logger.py              # 统一日志配置
+├── metrics.py             # 可观测性（计时 + 指标收集）
+├── embedder.py            # Embedding 模块（智谱 API）
+├── data_pipeline.py       # 数据处理 + 增量索引
+├── retriever.py           # 混合检索向下兼容入口
+├── intent_router.py       # 意图路由（原型向量分类）
+├── generator.py           # LLM 生成（流式输出）
+├── kg_*.py                # 知识图谱三元组抽取与存储
+├── evaluator.py           # 评估（Embedding + LLM-as-Judge）
+├── ablation.py            # 消融实验脚本
+├── app.py                 # Gradio 应用入口（仅负责启动）
+├── Dockerfile             # Docker 一键部署
+├── .env.example           # 环境变量模板
 └── README.md
 ```
 
@@ -137,6 +141,7 @@ Hybrid + Reranker        0.7234     0.7890      4.3       4.3       4.3
 
 ## 📝 设计决策
 
+- **分层解耦架构**: 拆分出 `core`、`retrieval`、`ui` 层，将数据契约、子组件、视图逻辑与应用入口分离，提高了模块内聚度并极大简化了 `app.py`
 - **混合检索 (Hybrid Search)**: 纯语义检索对精确关键词弱，BM25 补充关键词匹配，RRF 融合两路结果
 - **两阶段排序**: 先多路召回 top-5，再 Rerank 取 top-3，平衡召回率和精准度
 - **LLM-as-Judge**: 从检索相关性、回答忠实度、回答完整度三个维度自动化评估

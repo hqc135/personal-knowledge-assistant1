@@ -126,6 +126,7 @@ def run_eval(
     retrieve_mode: str = "auto",
     use_rerank: Optional[bool] = None,
     use_llm_judge: bool = True,
+    **kwargs
 ) -> dict:
     """
     统一评估入口。
@@ -145,7 +146,7 @@ def run_eval(
 
         try:
             contexts = retriever.retrieve(
-                query, mode=retrieve_mode, use_rerank=use_rerank,
+                query, mode=retrieve_mode, use_rerank=use_rerank, **kwargs
             )
             answer = generator.generate(query, contexts)
             ctx_texts = [c["text"] for c in contexts]

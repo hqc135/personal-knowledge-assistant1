@@ -20,6 +20,7 @@ from query_rewriter import QueryRewriter
 from metrics import Timer
 import config
 from typing import Optional
+from core.schemas import RetrievalResult, PipelineTrace
 
 import threading
 from collections import OrderedDict
@@ -52,45 +53,45 @@ class ThreadSafeLRUCache:
 
 
 class Retriever:
-    def __init__(self):
+    def __init__(self, **kwargs):
         self.embedder = ZhipuEmbedder()
         self.client = chromadb.PersistentClient(path=config.CHROMA_DB_PATH)
         self.collection = self.client.get_collection(config.COLLECTION_NAME)
 
         # Reranker
-        self.use_reranker = config.USE_RERANKER
+        self.use_reranker = kwargs.get("use_reranker", config.USE_RERANKER)
         if self.use_reranker:
             logger.info("加载 Reranker: %s", config.RERANKER_MODEL)
             self.reranker = CrossEncoder(config.RERANKER_MODEL, max_length=512)
             self.rerank_cache = ThreadSafeLRUCache(capacity=10000)
 
         # BM25 索引 (混合检索)
-        self.use_hybrid = config.USE_HYBRID_SEARCH
+        self.use_hybrid = kwargs.get("use_hybrid", config.USE_HYBRID_SEARCH)
         if self.use_hybrid:
             self._build_bm25_index()
 
         # KG 检索
-        self.use_kg = config.USE_KG_RETRIEVAL
+        self.use_kg = kwargs.get("use_kg", config.USE_KG_RETRIEVAL)
         if self.use_kg:
             self.kg = KGRetriever()
 
         # Intent Router
-        self.use_intent_router = config.USE_INTENT_ROUTER
+        self.use_intent_router = kwargs.get("use_intent_router", config.USE_INTENT_ROUTER)
         if self.use_intent_router:
             self.intent_router = IntentRouter(self.embedder)
 
         # Query Aligner
-        self.use_query_aligner = config.USE_QUERY_ALIGNER
+        self.use_query_aligner = kwargs.get("use_query_aligner", config.USE_QUERY_ALIGNER)
         if self.use_query_aligner:
             self.query_aligner = QueryAligner()
             
         # Query Rewriter
-        self.use_query_rewriter = config.USE_QUERY_REWRITER
+        self.use_query_rewriter = kwargs.get("use_query_rewriter", config.USE_QUERY_REWRITER)
         if self.use_query_rewriter:
             self.query_rewriter = QueryRewriter()
 
         self.summary_client = None
-        if config.INTENT_ROUTER_GLOBAL_MODE == "summary":
+        if kwargs.get("intent_router_global_mode", config.INTENT_ROUTER_GLOBAL_MODE) == "summary":
             self.summary_client = OpenAI(
                 api_key=config.DEEPSEEK_API_KEY,
                 base_url=config.LLM_BASE_URL,
@@ -126,8 +127,10 @@ class Retriever:
         except Exception as e:
             logger.warning("后台预热过程出现异常，但不影响正常运行: %s", e)
 
-    def _align_query(self, query: str) -> tuple[str, QueryAlignmentResult | None]:
-        if not self.use_query_aligner:
+    def _align_query(self, query: str, use_query_aligner: bool = None) -> tuple[str, QueryAlignmentResult | None]:
+        if use_query_aligner is None:
+            use_query_aligner = getattr(self, "use_query_aligner", False)
+        if not use_query_aligner:
             return query, None
 
         with Timer() as t_align:
@@ -218,8 +221,10 @@ class Retriever:
         sorted_ids = sorted(rrf_scores, key=lambda x: rrf_scores[x], reverse=True)
         return [{**doc_map[did], "score": rrf_scores[did]} for did in sorted_ids]
 
-    def _kg_search(self, query: str, top_k: int) -> list[dict]:
-        if not self.use_kg:
+    def _kg_search(self, query: str, top_k: int, use_kg: bool = None) -> list[dict]:
+        if use_kg is None:
+            use_kg = getattr(self, "use_kg", False)
+        if not use_kg:
             return []
 
         chunk_ids = self.kg.retrieve_chunk_ids(query, top_k=top_k)
@@ -519,6 +524,7 @@ class Retriever:
         top_k: Optional[int] = None,
         final_k: Optional[int] = None,
         history: Optional[list[dict]] = None,
+        **kwargs
     ) -> list[dict]:
         """
         检索入口。
@@ -528,8 +534,14 @@ class Retriever:
         """
         top_k = top_k or config.RETRIEVER_RECALL_TOP_K
         final_k = final_k or config.RETRIEVER_FINAL_K
-        if use_rerank is None:
-            use_rerank = self.use_reranker
+        
+        # 覆盖参数
+        use_rerank = kwargs.get("use_reranker", self.use_reranker) if use_rerank is None else use_rerank
+        use_query_rewriter = kwargs.get("use_query_rewriter", getattr(self, "use_query_rewriter", False))
+        use_intent_router = kwargs.get("use_intent_router", getattr(self, "use_intent_router", False))
+        use_query_aligner = kwargs.get("use_query_aligner", getattr(self, "use_query_aligner", False))
+        use_kg = kwargs.get("use_kg", getattr(self, "use_kg", False))
+        use_hybrid = kwargs.get("use_hybrid", getattr(self, "use_hybrid", False))
         self.last_timing = {
             "rewrite_ms": 0.0,
             "align_ms": 0.0,
@@ -541,7 +553,7 @@ class Retriever:
         }
 
         # ── 0. 查询重写 (指代消解) ──
-        if self.use_query_rewriter and history:
+        if use_query_rewriter and history:
             with Timer() as t_rewrite:
                 rewritten_query = self.query_rewriter.rewrite(query, history)
             self.last_timing["rewrite_ms"] = t_rewrite.elapsed_ms
@@ -551,14 +563,14 @@ class Retriever:
                 self.last_timing["rewritten_query"] = rewritten_query
                 query = rewritten_query
 
-        if mode == "auto" and self.use_intent_router:
+        if mode == "auto" and use_intent_router:
             route, route_info = self.intent_router.route(query)
             self.last_timing["route"] = route
             self.last_timing["route_decision"] = route
             self.last_timing["route_info"] = route_info
 
             if route == "global":
-                aligned_query, _alignment = self._align_query(query)
+                aligned_query, _alignment = self._align_query(query, use_query_aligner=use_query_aligner)
                 self.last_timing["aligned_query"] = aligned_query
                 self.last_timing["route_decision"] = "global"
                 with Timer() as t_embed:
@@ -583,12 +595,12 @@ class Retriever:
                     for c in candidates
                 ]
 
-        aligned_query, _alignment = self._align_query(query)
+        aligned_query, _alignment = self._align_query(query, use_query_aligner=use_query_aligner)
         self.last_timing["aligned_query"] = aligned_query
         self.last_timing["route_decision"] = "local"
 
         if mode == "auto":
-            mode = "hybrid" if self.use_hybrid else "vector"
+            mode = "hybrid" if use_hybrid else "vector"
 
         # ── Embedding + 检索 ──
         with Timer() as t_embed:
@@ -611,10 +623,10 @@ class Retriever:
 
         self.last_timing["embed_ms"] = t_embed.elapsed_ms
 
-        if self.use_kg:
+        if use_kg:
             base_count = len(candidates)
             with Timer() as t_kg:
-                kg_candidates = self._kg_search(aligned_query, config.KG_TOP_K)
+                kg_candidates = self._kg_search(aligned_query, config.KG_TOP_K, use_kg=use_kg)
             self.last_timing["kg_ms"] = t_kg.elapsed_ms
             if kg_candidates:
                 candidates = self._merge_candidates(
@@ -639,7 +651,7 @@ class Retriever:
         rerank_ms = 0.0
         seed_candidates = candidates[:final_k]
 
-        if use_rerank and self.use_reranker and seed_candidates:
+        if use_rerank and getattr(self, "use_reranker", False) and seed_candidates:
             with Timer() as t_rerank:
                 scores = [None] * len(seed_candidates)
                 uncached_pairs = []
@@ -708,3 +720,31 @@ class Retriever:
             }
             for c in candidates
         ]
+
+    def retrieve_with_trace(
+        self,
+        query: str,
+        mode: str = "auto",
+        use_rerank: Optional[bool] = None,
+        top_k: Optional[int] = None,
+        final_k: Optional[int] = None,
+        history: Optional[list[dict]] = None,
+        **kwargs
+    ) -> RetrievalResult:
+        """
+        结构化检索入口（新接口，供 pipeline.py / app.py 使用）。
+
+        与 retrieve() 参数完全相同，但返回 RetrievalResult(contexts, trace)
+        而非 list[dict] + 副作用 last_timing。
+        """
+        contexts = self.retrieve(
+            query,
+            mode=mode,
+            use_rerank=use_rerank,
+            top_k=top_k,
+            final_k=final_k,
+            history=history,
+            **kwargs,
+        )
+        trace = PipelineTrace.from_dict(self.last_timing)
+        return RetrievalResult(contexts=contexts, trace=trace)
