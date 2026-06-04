@@ -36,6 +36,20 @@ class Generator:
         return str(raw_content or "")
 
     @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """
+        用正则区分 ASCII 与非 ASCII 字符，进行非对称多量纲加权估算：
+        - ASCII 字符通常 3-4 个字符对应一个 token，取权重 0.3。
+        - 中文等非 ASCII 字符，通常一个字符对应 1-2 个 token，取权重 1.5。
+        更精确地适应混合文本的 Token 预算控制。
+        """
+        if not text:
+            return 0
+        ascii_len = len(re.findall(r'[\x00-\x7F]', text))
+        non_ascii_len = len(text) - ascii_len
+        return max(1, int(ascii_len * 0.3 + non_ascii_len * 1.5))
+
+    @staticmethod
     def _clean_assistant_content(content: str) -> str:
         """
         从 assistant 历史消息中剥离 UI 专用装饰块：
@@ -96,19 +110,21 @@ class Generator:
         history: list[dict] | None = None,
     ) -> list[dict]:
         """
-        构建 LLM 消息列表。
+        构建 LLM 消息列表，含 Token 预算感知的历史截断。
+
+        算法：
+          1. 计算固定部分 token：system prompt + 当前 user 消息（context + query）+ 输出预算
+          2. 剩余预算用于历史消息，从最近轮次开始贪婪装入
+          3. 最大轮数上限和预算上限取交集，取更严格的一方
 
         history 格式：Gradio messages 格式，每条形如
           {"role": "user"|"assistant", "content": "..."}
-        取最近 config.LLM_HISTORY_TURNS 轮（每轮 = 1 user + 1 assistant），
-        assistant 消息会先经 _clean_assistant_content 剥离 UI 装饰块。
         """
         context_text = "\n\n---\n\n".join(
             self._format_evidence_chain(c)
             for c in contexts
         )
 
-        # 💡 提示词也做了深度精简，仅用短小精悍的说明教大模型认清量纲即可，完全不占 token
         system_prompt = (
             "你是一个知识库助手。根据提供的上下文回答问题。\n"
             "【分数语义说明】：\n"
@@ -121,31 +137,70 @@ class Generator:
             "回答时引用来源文件名，并尽量在正文关键要点后保留分值线索。如果上下文中没有相关信息，明确说明你不知道。"
         )
 
+        current_user_content = f"上下文证据链：\n{context_text}\n\n问题: {query}"
+
+        # ── Token 预算计算 ───────────────────────────────────────────────
+        max_total = config.LLM_MAX_CONTEXT_TOKENS
+        safety_margin = config.LLM_TOKEN_SAFETY_MARGIN
+        output_budget = config.LLM_MAX_TOKENS
+
+        fixed_tokens = (
+            self._estimate_tokens(system_prompt)
+            + self._estimate_tokens(current_user_content)
+            + output_budget
+            + safety_margin
+        )
+        history_budget = max_total - fixed_tokens
+
+        if history_budget <= 0:
+            logger.warning(
+                "Token 预算已被固定部分耗尽（fixed=%d / budget=%d），"
+                "跳过全部历史。建议增大 LLM_MAX_CONTEXT_TOKENS 或减小检索 top_k。",
+                fixed_tokens, max_total,
+            )
+
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
 
-        # ── 注入历史轮次 ──────────────────────────────────────
+        # ── 注入历史轮次（预算感知，从最近轮次贪婪装入） ────────────────
         max_turns = config.LLM_HISTORY_TURNS
-        if max_turns > 0 and history:
-            # 只保留 role in {user, assistant} 的消息，跳过其他（如 system）
+        if max_turns > 0 and history and history_budget > 0:
             valid = [
                 m for m in history
                 if isinstance(m, dict) and m.get("role") in ("user", "assistant")
             ]
-            # 取最近 max_turns 轮（= 2*max_turns 条消息）
-            recent = valid[-(max_turns * 2):]
-            for msg in recent:
+            # 候选集：最近 max_turns 轮（= 2*max_turns 条消息）
+            candidates = valid[-(max_turns * 2):]
+
+            # 从最近一条开始反向遍历，贪婪装入直到预算耗尽
+            used_tokens = 0
+            kept: list[dict] = []
+            for msg in reversed(candidates):
                 role = msg["role"]
                 content = self._extract_text(msg.get("content"))
                 if role == "assistant":
                     content = self._clean_assistant_content(content)
-                if content.strip():
-                    messages.append({"role": role, "content": content})
+                if not content.strip():
+                    continue
+                cost = self._estimate_tokens(content)
+                if used_tokens + cost > history_budget:
+                    logger.warning(
+                        "历史消息 Token 预算已满，丢弃更早轮次。"
+                        "（已用 %d / budget %d，本条需要 %d）",
+                        used_tokens, history_budget, cost,
+                    )
+                    break
+                used_tokens += cost
+                kept.append({"role": role, "content": content})
 
-        # ── 当前 user 消息（附带检索上下文） ──────────────────
+            # kept 是逆序的，翻转后按时间顺序插入
+            for msg in reversed(kept):
+                messages.append(msg)
+
+        # ── 当前 user 消息（附带检索上下文） ──────────────────────────
         messages.append(
             {
                 "role": "user",
-                "content": f"上下文证据链:\n{context_text}\n\n问题: {query}",
+                "content": current_user_content,
             }
         )
         return messages

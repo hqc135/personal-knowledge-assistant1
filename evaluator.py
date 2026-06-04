@@ -40,7 +40,7 @@ _JUDGE_PROMPT = """\
 3. **回答完整度** (completeness): 回答是否充分回答了问题
    - 5分: 全面完整  1分: 几乎没回答
 
-请严格以如下 JSON 格式输出 (不要添加其他内容):
+请严格以如下 JSON 格式输出 (不要添加其他内容)，reason 字段不超过 50 个字：
 {{"retrieval_relevance": <int>, "faithfulness": <int>, "completeness": <int>, "reason": "<简短理由>"}}
 """
 
@@ -74,25 +74,54 @@ class LLMJudgeEvaluator:
 
     @staticmethod
     def _extract_json(text: str) -> dict:
-        """尽量从模型输出中提取 JSON 对象"""
-        content = text.strip()
+        """从模型输出中提取 JSON 对象，增强容错：支持代码块、BOM、控制字符、截断 JSON。"""
+        # 去除 BOM 和首尾空白
+        content = text.strip().lstrip("\ufeff")
+
+        # 去除非法控制字符（除 \t \n \r 外），避免 JSON 解析崩溃
+        content = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", content)
+
+        # 处理 markdown 代码块包裹
         if "```" in content:
             parts = content.split("```")
             if len(parts) >= 2:
-                content = parts[1].strip()
-                if content.startswith("json"):
-                    content = content[4:].strip()
+                block = parts[1].strip()
+                if block.startswith("json"):
+                    block = block[4:].strip()
+                content = block
 
+        # 尝试直接解析
         try:
             return json.loads(content)
         except json.JSONDecodeError:
-            match = re.search(r"\{[\s\S]*\}", content)
-            if match:
-                return json.loads(match.group(0))
-            raise
+            pass
+
+        # 提取第一个 {...} 块
+        match = re.search(r"\{[\s\S]*\}", content)
+        if match:
+            candidate = match.group(0)
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                # 如果 JSON 被截断（末尾缺少 "}"），尝试补齐后再解析
+                if not candidate.rstrip().endswith("}"):
+                    try:
+                        return json.loads(candidate.rstrip().rstrip(",") + "}")
+                    except json.JSONDecodeError:
+                        pass
+
+        raise ValueError(f"无法从输出中提取合法 JSON: {text[:200]!r}")
 
     def judge(self, query: str, contexts: list[str], answer: str) -> dict:
+        # 截断过长的 context 和 answer，防止 judge 请求超出 token 窗口导致空响应
+        max_ctx = config.EVAL_JUDGE_MAX_CTX_CHARS
+        max_ans = config.EVAL_JUDGE_MAX_ANS_CHARS
         ctx_text = "\n---\n".join(contexts)
+        if len(ctx_text) > max_ctx:
+            ctx_text = ctx_text[:max_ctx] + "\n...[上下文已截断]"
+        if len(answer) > max_ans:
+            answer = answer[:max_ans] + "...[回答已截断]"
+
         prompt = _JUDGE_PROMPT.format(query=query, contexts=ctx_text, answer=answer)
         last_error: Exception | None = None
         for attempt in range(1, 4):
@@ -101,9 +130,11 @@ class LLMJudgeEvaluator:
                     model=config.LLM_MODEL,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.1,
-                    max_tokens=300,
+                    max_tokens=512,
                 )
                 content = response.choices[0].message.content or ""
+                if not content.strip():
+                    raise ValueError("LLM Judge 返回了空响应（可能超出 token 或 rate limit）")
                 return self._extract_json(content)
             except Exception as e:
                 last_error = e
@@ -112,9 +143,9 @@ class LLMJudgeEvaluator:
                     time.sleep(1.0 * attempt)
 
         return {
-            "retrieval_relevance": 0,
-            "faithfulness": 0,
-            "completeness": 0,
+            "retrieval_relevance": None,
+            "faithfulness": None,
+            "completeness": None,
             "reason": f"评估失败: {last_error}",
         }
 
@@ -206,7 +237,8 @@ def run_eval(
 
 
 def _avg(items: list[dict], key: str) -> float:
-    vals = [r[key] for r in items if key in r]
+    """计算均值，跳过 None 值（技术失败不计入统计，避免虚假拉低分数）"""
+    vals = [r[key] for r in items if key in r and r[key] is not None]
     return round(float(np.mean(vals)), 4) if vals else 0.0
 
 

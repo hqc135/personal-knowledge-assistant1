@@ -37,6 +37,11 @@ LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 # 多轮对话：注入给 LLM 的历史轮数上限（每轮 = 1 user + 1 assistant）；设为 0 禁用
 LLM_HISTORY_TURNS = int(os.getenv("LLM_HISTORY_TURNS", "3"))
+# Token 预算控制：模型总上下文窗口的安全上限（含输入+输出）
+# DeepSeek V3 实际窗口 64K，保守设置 32K 以留出余量；可通过 .env 调整
+LLM_MAX_CONTEXT_TOKENS = int(os.getenv("LLM_MAX_CONTEXT_TOKENS", "32000"))
+# 安全冗余：预算计算时额外保留的 token 数，应对估算误差
+LLM_TOKEN_SAFETY_MARGIN = int(os.getenv("LLM_TOKEN_SAFETY_MARGIN", "500"))
 
 # ── Retriever 配置 ────────────────────────────────────────
 RETRIEVER_TOP_K = int(os.getenv("RETRIEVER_TOP_K", "5"))
@@ -127,4 +132,10 @@ KG_ENTITY_VECTOR_MIN_SIM = float(os.getenv("KG_ENTITY_VECTOR_MIN_SIM", "0.35"))
 
 # ── 可观测性 配置 ─────────────────────────────────────────
 METRICS_MAX_HISTORY = int(os.getenv("METRICS_MAX_HISTORY", "200"))
+
+# ── 评估 (Eval) 配置 ──────────────────────────────────────
+# LLM-as-Judge 调用时，传入的上下文最大字符数（超出则截断），防止 judge 请求超 token
+EVAL_JUDGE_MAX_CTX_CHARS = int(os.getenv("EVAL_JUDGE_MAX_CTX_CHARS", "2000"))
+# LLM-as-Judge 调用时，传入的回答最大字符数（超出则截断）
+EVAL_JUDGE_MAX_ANS_CHARS = int(os.getenv("EVAL_JUDGE_MAX_ANS_CHARS", "800"))
 
