@@ -113,6 +113,20 @@ SEMANTIC_MIN_CHUNK_SIZE = int(os.getenv("SEMANTIC_MIN_CHUNK_SIZE", "80"))
 # chunk 字符上限：超过此值时对该 chunk 按句子二分强制硬切
 SEMANTIC_MAX_CHUNK_SIZE = int(os.getenv("SEMANTIC_MAX_CHUNK_SIZE", "1200"))
 
+# ── Parent-Child Hierarchical RAG 配置 ────────────────────
+# 总开关；启用后索引和检索均使用 Parent-Child 两层分块策略
+USE_PARENT_CHILD = os.getenv("USE_PARENT_CHILD", "false").lower() == "true"
+# Parent collection 名称
+PARENT_COLLECTION_NAME = os.getenv("PARENT_COLLECTION_NAME", "my_knowledge_base_parents")
+# Parent chunk 大小范围（chars）
+PARENT_CHUNK_MAX_SIZE = int(os.getenv("PARENT_CHUNK_MAX_SIZE", "2500"))
+PARENT_CHUNK_MIN_SIZE = int(os.getenv("PARENT_CHUNK_MIN_SIZE", "500"))
+# Child chunk 大小范围（chars）；启用时覆盖 SEMANTIC_MIN/MAX_CHUNK_SIZE
+CHILD_CHUNK_MAX_SIZE = int(os.getenv("CHILD_CHUNK_MAX_SIZE", "400"))
+CHILD_CHUNK_MIN_SIZE = int(os.getenv("CHILD_CHUNK_MIN_SIZE", "80"))
+# 检索时最多返回的 parent 数
+PARENT_CHILD_MAX_PARENTS = int(os.getenv("PARENT_CHILD_MAX_PARENTS", "5"))
+
 # ── 混合检索 配置 ─────────────────────────────────────────
 USE_HYBRID_SEARCH = os.getenv("USE_HYBRID_SEARCH", "true").lower() == "true"
 RRF_K = int(os.getenv("RRF_K", "60"))
@@ -129,6 +143,8 @@ KG_FALLBACK_MODEL = os.getenv("KG_FALLBACK_MODEL", "deepseek-chat")
 KG_EXTRACTION_WORKERS = int(os.getenv("KG_EXTRACTION_WORKERS", "4"))  # 三元组并发抽取线程数
 KG_ENTITY_VECTOR_TOP_K = int(os.getenv("KG_ENTITY_VECTOR_TOP_K", "5"))
 KG_ENTITY_VECTOR_MIN_SIM = float(os.getenv("KG_ENTITY_VECTOR_MIN_SIM", "0.35"))
+KG_MAX_HOPS = int(os.getenv("KG_MAX_HOPS", "2"))
+KG_MAX_SUBGRAPH_TRIPLES = int(os.getenv("KG_MAX_SUBGRAPH_TRIPLES", "30"))
 
 # ── 可观测性 配置 ─────────────────────────────────────────
 METRICS_MAX_HISTORY = int(os.getenv("METRICS_MAX_HISTORY", "200"))

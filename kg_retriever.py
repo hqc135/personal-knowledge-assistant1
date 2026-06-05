@@ -156,26 +156,77 @@ class KGRetriever:
 
         return combined if combined else list(exact_set)
 
-    def retrieve_chunk_ids(self, query: str, top_k: int | None = None) -> list[str]:
+    def retrieve_subgraph(self, query: str, hops: int | None = None, top_k: int | None = None) -> tuple[list[str], list[dict]]:
+        """
+        根据查询实体进行多跳子图遍历。
+        返回 (关联的 chunk_ids 列表, 子图的三元组列表)。
+        """
         top_k = top_k or config.KG_TOP_K
+        hops = hops or getattr(config, "KG_MAX_HOPS", 2)
+        max_triples = getattr(config, "KG_MAX_SUBGRAPH_TRIPLES", 30)
+
         entities = self._match_entities(query)
         if not entities:
-            return []
+            return [], []
 
+        visited_entities: set[str] = set()
+        current_entities = set(entities)
+        
         counter: Counter[str] = Counter()
-        for entity in entities:
-            # Check out-edges (where entity is head)
-            for _, _, data in self._graph.edges(entity, data=True):
-                chunk_id = data.get("chunk_id")
-                if chunk_id:
-                    counter[chunk_id] += 1
-            # Check in-edges (where entity is tail)
-            for _, _, data in self._graph.in_edges(entity, data=True):
-                chunk_id = data.get("chunk_id")
-                if chunk_id:
-                    counter[chunk_id] += 1
+        subgraph_triples: list[dict] = []
+        seen_triples = set()
 
-        if not counter:
-            return []
+        for _ in range(hops):
+            if not current_entities or len(subgraph_triples) >= max_triples:
+                break
+                
+            next_entities = set()
+            for entity in current_entities:
+                if len(subgraph_triples) >= max_triples:
+                    break
+                    
+                # Out-edges
+                for _, tail, data in self._graph.edges(entity, data=True):
+                    if len(subgraph_triples) >= max_triples:
+                        break
+                    chunk_id = data.get("chunk_id")
+                    if chunk_id:
+                        counter[chunk_id] += 1
+                        
+                    triple_tuple = (entity, data.get("relation"), tail)
+                    if triple_tuple not in seen_triples:
+                        seen_triples.add(triple_tuple)
+                        subgraph_triples.append({
+                            "head": entity,
+                            "relation": data.get("relation"),
+                            "tail": tail,
+                            "source": data.get("source"),
+                            "chunk_id": chunk_id,
+                        })
+                    next_entities.add(tail)
+                    
+                # In-edges
+                for head, _, data in self._graph.in_edges(entity, data=True):
+                    if len(subgraph_triples) >= max_triples:
+                        break
+                    chunk_id = data.get("chunk_id")
+                    if chunk_id:
+                        counter[chunk_id] += 1
+                        
+                    triple_tuple = (head, data.get("relation"), entity)
+                    if triple_tuple not in seen_triples:
+                        seen_triples.add(triple_tuple)
+                        subgraph_triples.append({
+                            "head": head,
+                            "relation": data.get("relation"),
+                            "tail": entity,
+                            "source": data.get("source"),
+                            "chunk_id": chunk_id,
+                        })
+                    next_entities.add(head)
+            
+            visited_entities.update(current_entities)
+            current_entities = next_entities - visited_entities
 
-        return [chunk_id for chunk_id, _ in counter.most_common(top_k)]
+        chunk_ids = [chunk_id for chunk_id, _ in counter.most_common(top_k)]
+        return chunk_ids, subgraph_triples

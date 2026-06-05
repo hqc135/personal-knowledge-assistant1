@@ -22,6 +22,7 @@ from embedder import ZhipuEmbedder
 from kg_extractor import extract_triples
 from kg_store import append_triples
 import config
+from parent_child_chunker import ParentChildChunker
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +220,25 @@ class DocumentProcessor:
             metadata={"hf_space": "personal_kb"}
         )
 
+        # ── Parent-Child 模式 ──
+        self.use_parent_child = config.USE_PARENT_CHILD
+        if self.use_parent_child:
+            self.parent_collection = self.client.get_or_create_collection(
+                name=config.PARENT_COLLECTION_NAME,
+                metadata={"hf_space": "personal_kb_parents"},
+            )
+            self._pc_chunker = ParentChildChunker(self.embedder)
+            logger.info(
+                "Parent-Child 分层分块已启用（parent=%d~%d, child=%d~%d）",
+                config.PARENT_CHUNK_MIN_SIZE,
+                config.PARENT_CHUNK_MAX_SIZE,
+                config.CHILD_CHUNK_MIN_SIZE,
+                config.CHILD_CHUNK_MAX_SIZE,
+            )
+        else:
+            self.parent_collection = None
+            self._pc_chunker = None
+
         # 根据配置选择分块器
         if config.SEMANTIC_CHUNKER_ENABLED:
             logger.info(
@@ -290,15 +310,60 @@ class DocumentProcessor:
             encoding="utf-8",
         )
 
-    def load_markdown_dir(self, dir_path: str, incremental: bool = True) -> list[dict]:
+    def load_markdown_dir(self, dir_path: str, incremental: bool = True) -> list[dict] | tuple[list[dict], list[dict]]:
         """
         递归加载目录下所有 markdown 文件。
         incremental=True 时只处理新增/变更的文件。
+
+        返回值：
+          - 非 Parent-Child 模式：list[dict]（与以前一致）
+          - Parent-Child 模式：(parent_docs, child_docs) 二元组
         """
         dir_path_obj = Path(dir_path)
         all_files = list(dir_path_obj.rglob("*.md"))
         index_meta = self._load_index_meta() if incremental else {}
 
+        # Parent-Child 模式
+        if self.use_parent_child:
+            all_parents: list[dict] = []
+            all_children: list[dict] = []
+            updated_meta: dict[str, str] = {}
+            skipped = 0
+
+            for path in all_files:
+                relative = path.relative_to(dir_path_obj)
+                file_key = str(relative)
+                current_hash = self._file_hash(path)
+                updated_meta[file_key] = current_hash
+
+                if incremental and index_meta.get(file_key) == current_hash:
+                    skipped += 1
+                    continue
+
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except Exception as e:
+                    logger.error("读取文件失败 %s: %s", path, e)
+                    continue
+
+                parents, children = self._pc_chunker.split_document(
+                    text, str(relative)
+                )
+                all_parents.extend(parents)
+                all_children.extend(children)
+
+            if skipped:
+                logger.info("跳过 %d 个未变更文件", skipped)
+            logger.info(
+                "Parent-Child 待索引: %d 个文件, %d parents, %d children",
+                len(all_files) - skipped,
+                len(all_parents),
+                len(all_children),
+            )
+            self._save_index_meta(updated_meta)
+            return all_parents, all_children
+
+        # ── 原有逻辑（非 Parent-Child 模式） ──
         docs = []
         updated_meta: dict[str, str] = {}
         skipped = 0
@@ -341,8 +406,22 @@ class DocumentProcessor:
 
         return docs
 
-    def index(self, docs: list):
-        """批量 embedding 并写入 ChromaDB"""
+    def index(self, docs):
+        """
+        批量 embedding 并写入 ChromaDB。
+
+        docs 可以是：
+          - list[dict]：传统单层 chunk 列表
+          - tuple[list[dict], list[dict]]：(parent_docs, child_docs) 二元组
+            （Parent-Child 模式下由 load_markdown_dir 返回）
+        """
+        # ── Parent-Child 模式 ──
+        if isinstance(docs, tuple) and len(docs) == 2:
+            parent_docs, child_docs = docs
+            self._index_parent_child(parent_docs, child_docs)
+            return
+
+        # ── 原有逻辑（非 Parent-Child 模式） ──
         if not docs:
             logger.info("没有需要索引的文档")
             return
@@ -366,33 +445,90 @@ class DocumentProcessor:
         )
         logger.info("索引完成: %d chunks 已写入", len(docs))
 
-        if config.USE_KG_EXTRACTION:
-            workers = config.KG_EXTRACTION_WORKERS
-            logger.info(
-                "开始并发抽取知识图谱三元组（workers=%d, chunks=%d）...",
-                workers, len(docs),
+        self._extract_kg_triples(docs)
+
+    def _index_parent_child(
+        self,
+        parent_docs: list[dict],
+        child_docs: list[dict],
+    ):
+        """分别将 parent 和 child docs 写入各自的 ChromaDB collection。"""
+        if not parent_docs and not child_docs:
+            logger.info("Parent-Child: 没有需要索引的文档")
+            return
+
+        # ── 索引 Parent ──
+        if parent_docs:
+            p_texts = [d["text"] for d in parent_docs]
+            p_ids = [d["id"] for d in parent_docs]
+            p_metas = [d["metadata"] for d in parent_docs]
+
+            logger.info("正在生成 Parent Embedding (%d parents)...", len(p_texts))
+            p_embeddings = self.embedder.encode(
+                p_texts, normalize_embeddings=True
+            ).tolist()
+
+            self.parent_collection.upsert(
+                ids=p_ids,
+                documents=p_texts,
+                embeddings=p_embeddings,
+                metadatas=p_metas,
             )
-            all_triples: list[dict] = []
+            logger.info("Parent 索引完成: %d parents 已写入", len(parent_docs))
 
-            def _extract_one(doc: dict) -> list[dict]:
-                return extract_triples(
-                    doc["text"],
-                    source=doc["metadata"]["source"],
-                    chunk_id=doc["id"],
-                )
+        # ── 索引 Child ──
+        if child_docs:
+            c_texts = [d["text"] for d in child_docs]
+            c_ids = [d["id"] for d in child_docs]
+            c_metas = [d["metadata"] for d in child_docs]
 
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = {pool.submit(_extract_one, doc): doc for doc in docs}
-                for future in as_completed(futures):
-                    doc = futures[future]
-                    try:
-                        triples = future.result()
-                        all_triples.extend(triples)
-                    except Exception as exc:
-                        logger.warning("三元组抽取失败 %s: %s", doc["id"], exc)
+            logger.info("正在生成 Child Embedding (%d children)...", len(c_texts))
+            c_embeddings = self.embedder.encode(
+                c_texts, normalize_embeddings=True
+            ).tolist()
 
-            added = append_triples(all_triples)
-            logger.info("三元组写入完成: 新增 %d 条", added)
+            self.collection.upsert(
+                ids=c_ids,
+                documents=c_texts,
+                embeddings=c_embeddings,
+                metadatas=c_metas,
+            )
+            logger.info("Child 索引完成: %d children 已写入", len(child_docs))
+
+        # KG 三元组抽取（基于 parent 粒度，上下文更完整）
+        self._extract_kg_triples(parent_docs)
+
+    def _extract_kg_triples(self, docs: list[dict]):
+        """对文档列表执行 KG 三元组抽取（若启用）。"""
+        if not config.USE_KG_EXTRACTION or not docs:
+            return
+
+        workers = config.KG_EXTRACTION_WORKERS
+        logger.info(
+            "开始并发抽取知识图谱三元组（workers=%d, chunks=%d）...",
+            workers, len(docs),
+        )
+        all_triples: list[dict] = []
+
+        def _extract_one(doc: dict) -> list[dict]:
+            return extract_triples(
+                doc["text"],
+                source=doc["metadata"]["source"],
+                chunk_id=doc["id"],
+            )
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_extract_one, doc): doc for doc in docs}
+            for future in as_completed(futures):
+                doc = futures[future]
+                try:
+                    triples = future.result()
+                    all_triples.extend(triples)
+                except Exception as exc:
+                    logger.warning("三元组抽取失败 %s: %s", doc["id"], exc)
+
+        added = append_triples(all_triples)
+        logger.info("三元组写入完成: 新增 %d 条", added)
 
 
 if __name__ == "__main__":

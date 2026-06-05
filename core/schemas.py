@@ -41,6 +41,11 @@ class PipelineTrace:
     route_info: dict = field(default_factory=dict)
     kg_ms: float = 0.0
 
+    # ── Parent-Child Hierarchical RAG ──
+    parent_child_active: bool = False
+    parent_child_child_hits: int = 0
+    parent_child_unique_parents: int = 0
+
     def to_dict(self) -> dict:
         """向后兼容：转换为旧版 last_timing dict 格式，供遗留代码使用。"""
         return {
@@ -61,6 +66,9 @@ class PipelineTrace:
             "pure_search_ms": self.pure_search_ms,
             "route_info": self.route_info,
             "kg_ms": self.kg_ms,
+            "parent_child_active": self.parent_child_active,
+            "parent_child_child_hits": self.parent_child_child_hits,
+            "parent_child_unique_parents": self.parent_child_unique_parents,
         }
 
     @classmethod
@@ -85,6 +93,9 @@ class PipelineTrace:
             pure_search_ms=float(d.get("pure_search_ms") or 0.0),
             route_info=dict(d.get("route_info") or {}),
             kg_ms=float(d.get("kg_ms") or 0.0),
+            parent_child_active=bool(d.get("parent_child_active", False)),
+            parent_child_child_hits=int(d.get("parent_child_child_hits") or 0),
+            parent_child_unique_parents=int(d.get("parent_child_unique_parents") or 0),
         )
 
 

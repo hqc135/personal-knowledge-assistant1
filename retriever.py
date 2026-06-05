@@ -58,6 +58,16 @@ class Retriever:
         self.client = chromadb.PersistentClient(path=config.CHROMA_DB_PATH)
         self.collection = self.client.get_collection(config.COLLECTION_NAME)
 
+        # Parent-Child 模式
+        self.use_parent_child = kwargs.get("use_parent_child", config.USE_PARENT_CHILD)
+        if self.use_parent_child:
+            self.parent_collection = self.client.get_collection(
+                config.PARENT_COLLECTION_NAME
+            )
+            logger.info("Parent-Child 检索已启用")
+        else:
+            self.parent_collection = None
+
         # Reranker
         self.use_reranker = kwargs.get("use_reranker", config.USE_RERANKER)
         if self.use_reranker:
@@ -221,21 +231,36 @@ class Retriever:
         sorted_ids = sorted(rrf_scores, key=lambda x: rrf_scores[x], reverse=True)
         return [{**doc_map[did], "score": rrf_scores[did]} for did in sorted_ids]
 
-    def _kg_search(self, query: str, top_k: int, use_kg: bool = None) -> list[dict]:
+    def _kg_search(self, query: str, top_k: int, use_kg: bool = None) -> tuple[list[dict], str]:
         if use_kg is None:
             use_kg = getattr(self, "use_kg", False)
         if not use_kg:
-            return []
+            return [], ""
 
-        chunk_ids = self.kg.retrieve_chunk_ids(query, top_k=top_k)
+        chunk_ids, subgraph_triples = self.kg.retrieve_subgraph(query, top_k=top_k)
+        
+        # Format subgraph triples into text
+        subgraph_text = ""
+        if subgraph_triples:
+            lines = []
+            for t in subgraph_triples:
+                lines.append(f"({t['head']}) -[{t['relation']}]-> ({t['tail']})")
+            subgraph_text = "\n".join(lines)
+
         if not chunk_ids:
-            return []
+            return [], subgraph_text
 
-        results = self.collection.get(ids=chunk_ids, include=["documents", "metadatas"])
+        # Align with Parent-Child: Use parent collection if active
+        collection = self.parent_collection if getattr(self, "use_parent_child", False) else self.collection
+        results = collection.get(ids=chunk_ids, include=["documents", "metadatas"])
         
         doc_map = {}
         for doc_id, doc, meta in zip(results["ids"], results["documents"], results["metadatas"]):
-            doc_map[doc_id] = {"doc": doc, "meta": meta}
+            meta_dict = dict(meta or {})
+            if getattr(self, "use_parent_child", False):
+                # Inject parent_id so _parent_child_retrieve can aggregate it
+                meta_dict["parent_id"] = doc_id
+            doc_map[doc_id] = {"doc": doc, "meta": meta_dict}
 
         output: list[dict] = []
         for rank, doc_id in enumerate(chunk_ids):
@@ -247,7 +272,7 @@ class Retriever:
                 continue
             score = config.KG_SCORE_BASE + (max(top_k - rank, 0) / max(top_k, 1)) * 0.1
             output.append({"id": doc_id, "text": doc, "metadata": meta, "score": score})
-        return output
+        return output, subgraph_text
 
     @staticmethod
     def _chunk_id(source: str, chunk_index: int) -> str:
@@ -521,6 +546,137 @@ class Retriever:
             logger.warning("全局摘要生成失败: %s", exc)
             return ""
 
+    # ── Parent-Child 检索 ─────────────────────────────────
+
+    def _parent_child_retrieve(
+        self,
+        child_candidates: list[dict],
+        query: str,
+        final_k: int,
+        use_rerank: bool,
+    ) -> list[dict]:
+        """
+        Parent-Child 检索：从 child 候选中聚合 parent_id，获取 parent chunk。
+
+        流程：
+          1. 从 child_candidates 中提取 parent_id，保留最高分
+          2. 按分数排序，取 top PARENT_CHILD_MAX_PARENTS 个 parent
+          3. 从 parent_collection 批量获取 parent chunk 全文
+          4. 可选：对 parent chunk 做 Rerank
+          5. 返回 parent chunk 列表
+
+        Args:
+            child_candidates: 已从 child collection 召回的候选列表
+            query: 对齐后的查询文本
+            final_k: 最终返回的 context 数
+            use_rerank: 是否对 parent chunk 做 rerank
+        """
+        # ── 1. 聚合 parent_id，去重，取最高 child 分数 ──
+        parent_scores: dict[str, float] = {}
+        parent_child_count: dict[str, int] = {}
+        parent_channels: dict[str, set] = {}
+
+        for child in child_candidates:
+            meta = child.get("metadata") or {}
+            parent_id = meta.get("parent_id")
+            if not parent_id:
+                continue
+            score = child.get("score", 0.0)
+            if parent_id not in parent_scores or score > parent_scores[parent_id]:
+                parent_scores[parent_id] = score
+            parent_child_count[parent_id] = parent_child_count.get(parent_id, 0) + 1
+            if parent_id not in parent_channels:
+                parent_channels[parent_id] = set()
+            parent_channels[parent_id].update(child.get("channels") or [])
+
+        if not parent_scores:
+            # 没有 parent_id（可能是旧索引），降级返回 child 级结果
+            logger.warning(
+                "Parent-Child 检索: 未找到任何 parent_id，降级为 child 级上下文"
+            )
+            self.last_timing["parent_child_active"] = False
+            return child_candidates[:final_k]
+
+        child_hit_count = len(child_candidates)
+        unique_parent_count = len(parent_scores)
+        self.last_timing["parent_child_child_hits"] = child_hit_count
+        self.last_timing["parent_child_unique_parents"] = unique_parent_count
+
+        # ── 2. 按分数排序，取 top N ──
+        max_parents = config.PARENT_CHILD_MAX_PARENTS
+        sorted_parent_ids = sorted(
+            parent_scores, key=parent_scores.get, reverse=True
+        )[:max_parents]
+
+        # ── 3. 从 parent collection 获取 parent chunk ──
+        try:
+            results = self.parent_collection.get(
+                ids=sorted_parent_ids,
+                include=["documents", "metadatas"],
+            )
+        except Exception as exc:
+            logger.warning("获取 parent chunk 失败: %s", exc)
+            self.last_timing["parent_child_active"] = False
+            return child_candidates[:final_k]
+
+        parent_map: dict[str, dict] = {}
+        for pid, doc, meta in zip(
+            results["ids"], results["documents"], results["metadatas"]
+        ):
+            if doc is None:
+                continue
+            meta_dict = dict(meta or {})
+            meta_dict["score_type"] = "parent_child_aggregated_score"
+            meta_dict["child_hit_count"] = parent_child_count.get(pid, 0)
+            channels = sorted(parent_channels.get(pid, set()))
+            parent_map[pid] = {
+                "id": pid,
+                "text": doc,
+                "metadata": meta_dict,
+                "score": parent_scores.get(pid, 0.0),
+                "channels": channels + ["parent_child"],
+                "channel_scores": {},
+            }
+
+        # 按原始排序构建结果列表
+        parent_results: list[dict] = [
+            parent_map[pid] for pid in sorted_parent_ids if pid in parent_map
+        ]
+
+        if not parent_results:
+            logger.warning("Parent-Child 检索: parent collection 中未找到匹配文档")
+            self.last_timing["parent_child_active"] = False
+            return child_candidates[:final_k]
+
+        # ── 4. 可选 Rerank ──
+        if use_rerank and getattr(self, "use_reranker", False) and parent_results:
+            from metrics import Timer
+            with Timer() as t_rerank:
+                pairs = [[query, p["text"]] for p in parent_results]
+                batch_size = getattr(config, "RERANKER_BATCH_SIZE", 32)
+                scores = self.reranker.predict(pairs, batch_size=batch_size)
+
+                if isinstance(scores, float) or np.isscalar(scores):
+                    scores = [scores]
+
+                for p, s in zip(parent_results, scores):
+                    p["metadata"]["raw_rerank_logit"] = float(s)
+                    p["metadata"]["score_type"] = "rerank_compressed_score"
+                    p["score"] = float(1 / (1 + np.exp(-s)))
+
+                parent_results.sort(key=lambda x: x["score"], reverse=True)
+            self.last_timing["rerank_ms"] = t_rerank.elapsed_ms
+            self.last_timing["rerank_active"] = True
+
+        logger.info(
+            "Parent-Child 检索完成: %d child hits → %d unique parents → %d returned",
+            child_hit_count,
+            unique_parent_count,
+            len(parent_results[:final_k]),
+        )
+
+        return parent_results[:final_k]
+
     # ── 主检索入口 ────────────────────────────────────────
 
     def retrieve(
@@ -557,6 +713,9 @@ class Retriever:
             "align_triggered": False,
             "rerank_active": False,
             "rewrite_triggered": False,
+            "parent_child_active": False,
+            "parent_child_child_hits": 0,
+            "parent_child_unique_parents": 0,
         }
 
         # ── 0. 查询重写 (指代消解) ──
@@ -630,10 +789,11 @@ class Retriever:
 
         self.last_timing["embed_ms"] = t_embed.elapsed_ms
 
+        subgraph_text = ""
         if use_kg:
             base_count = len(candidates)
             with Timer() as t_kg:
-                kg_candidates = self._kg_search(aligned_query, config.KG_TOP_K, use_kg=use_kg)
+                kg_candidates, subgraph_text = self._kg_search(aligned_query, config.KG_TOP_K, use_kg=use_kg)
             self.last_timing["kg_ms"] = t_kg.elapsed_ms
             if kg_candidates:
                 candidates = self._merge_candidates(
@@ -653,6 +813,37 @@ class Retriever:
             )
 
         logger.debug("检索模式=%s, 候选数=%d", mode, len(candidates))
+
+        # ── Parent-Child 检索路径 ──
+        use_parent_child = kwargs.get("use_parent_child", getattr(self, "use_parent_child", False))
+        if use_parent_child and self.parent_collection is not None:
+            parent_contexts = self._parent_child_retrieve(
+                candidates, aligned_query, final_k, use_rerank,
+            )
+            self.last_timing["mode"] = mode
+            self.last_timing["parent_child_active"] = True
+            # Parent-Child 模式下直接返回 parent 级上下文，跳过邻居扩展
+            parent_contexts_formatted = [
+                {
+                    "text": c["text"],
+                    "metadata": c["metadata"],
+                    "score": c["score"],
+                    "channels": c.get("channels", []),
+                    "channel_scores": c.get("channel_scores", {})
+                }
+                for c in parent_contexts
+            ]
+            
+            # 追加 KG 局部子图
+            if subgraph_text:
+                parent_contexts_formatted.append({
+                    "text": "以下是检索到的知识图谱相关子图：\n" + subgraph_text,
+                    "metadata": {"source": "Knowledge Graph Subgraph", "chunk_type": "kg_subgraph"},
+                    "score": 1.0,
+                    "channels": ["kg"],
+                    "channel_scores": {"kg": 1.0}
+                })
+            return parent_contexts_formatted
 
         # ── Rerank ──
         rerank_ms = 0.0
@@ -715,7 +906,17 @@ class Retriever:
         self.last_timing["mode"] = mode
 
 # 去掉内部 id 字段再返回
-        candidates = self._sort_local_contexts(candidates)
+        local_contexts = self._sort_local_contexts(candidates)
+        # 追加 KG 局部子图
+        if subgraph_text:
+            local_contexts.append({
+                "text": "以下是检索到的知识图谱相关子图：\n" + subgraph_text,
+                "metadata": {"source": "Knowledge Graph Subgraph", "chunk_type": "kg_subgraph"},
+                "score": 1.0,
+                "channels": ["kg"],
+                "channel_scores": {"kg": 1.0}
+            })
+
         # 💡 扩充出口载荷，确保精排、粗排后的多维通道特征完整流入 generator.py
         return [
             {
@@ -725,7 +926,7 @@ class Retriever:
                 "channels": c.get("channels", []),
                 "channel_scores": c.get("channel_scores", {})
             }
-            for c in candidates
+            for c in local_contexts
         ]
 
     def retrieve_with_trace(
