@@ -21,7 +21,7 @@ class TestGeneratorPrompt:
         assert messages[0]["role"] == "system"
         assert "raw_scores" in messages[0]["content"]
         assert messages[1]["role"] == "user"
-        assert "上下文证据链:" in messages[1]["content"]
+        assert "上下文证据链：" in messages[1]["content"]
         assert "[来源: notes/demo.md]" in messages[1]["content"]
         assert "[通道: bm25, vector]" in messages[1]["content"]
         assert "raw_scores: bm25=2.5000, vector=0.9123" in messages[1]["content"]

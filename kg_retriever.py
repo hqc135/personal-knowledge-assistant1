@@ -230,3 +230,74 @@ class KGRetriever:
 
         chunk_ids = [chunk_id for chunk_id, _ in counter.most_common(top_k)]
         return chunk_ids, subgraph_triples
+
+    def get_central_subgraph(
+        self, top_entities: int = 5, max_triples: int = 50, top_k: int | None = None
+    ) -> tuple[list[str], list[dict]]:
+        """
+        获取全图核心子图（用于 Global 宏观检索）。
+        通过度中心性找出核心实体，并提取围绕它们的三元组。
+        """
+        top_k = top_k or config.KG_TOP_K
+        if not self._graph:
+            return [], []
+
+        # 计算节点的度中心性
+        degree_dict = dict(self._graph.degree())
+        if not degree_dict:
+            return [], []
+            
+        central_nodes = sorted(
+            degree_dict.keys(), key=lambda x: degree_dict[x], reverse=True
+        )[:top_entities]
+
+        subgraph_triples: list[dict] = []
+        counter: Counter[str] = Counter()
+        seen_triples = set()
+
+        for node in central_nodes:
+            # 获取出边
+            for _, tail, data in self._graph.edges(node, data=True):
+                if len(subgraph_triples) >= max_triples:
+                    break
+                t_tuple = (node, data.get("relation"), tail)
+                if t_tuple not in seen_triples:
+                    seen_triples.add(t_tuple)
+                    chunk_id = data.get("chunk_id")
+                    subgraph_triples.append(
+                        {
+                            "head": node,
+                            "relation": data.get("relation"),
+                            "tail": tail,
+                            "source": data.get("source"),
+                            "chunk_id": chunk_id,
+                        }
+                    )
+                    if chunk_id:
+                        counter[chunk_id] += 1
+
+            # 获取入边
+            for head, _, data in self._graph.in_edges(node, data=True):
+                if len(subgraph_triples) >= max_triples:
+                    break
+                t_tuple = (head, data.get("relation"), node)
+                if t_tuple not in seen_triples:
+                    seen_triples.add(t_tuple)
+                    chunk_id = data.get("chunk_id")
+                    subgraph_triples.append(
+                        {
+                            "head": head,
+                            "relation": data.get("relation"),
+                            "tail": node,
+                            "source": data.get("source"),
+                            "chunk_id": chunk_id,
+                        }
+                    )
+                    if chunk_id:
+                        counter[chunk_id] += 1
+                        
+            if len(subgraph_triples) >= max_triples:
+                break
+
+        chunk_ids = [cid for cid, _ in counter.most_common(top_k)]
+        return chunk_ids, subgraph_triples

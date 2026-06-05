@@ -414,6 +414,9 @@ class Retriever:
             metadata = item.get("metadata") or {}
             source = metadata.get("source")
             chunk_index = metadata.get("chunk_index")
+            if chunk_index is None:
+                chunk_index = metadata.get("parent_index")
+                
             if source is None or chunk_index is None:
                 passthrough.append((original_index, item))
                 continue
@@ -445,63 +448,52 @@ class Retriever:
         max_sources: int,
         max_chars: int,
     ) -> list[dict]:
-        if self.use_hybrid:
-            vector_results = self._vector_search(query, top_k)
-            bm25_results = self._bm25_search(query, top_k)
-            candidates = self._merge_candidates(
-                ("vector", vector_results),
-                ("bm25", bm25_results),
-                k=config.RRF_K,
-                weights={
-                    "vector": config.RETRIEVER_WEIGHT_VECTOR,
-                    "bm25": config.RETRIEVER_WEIGHT_BM25,
-                },
-            )
-        else:
-            candidates = self._vector_search(query, top_k)
+        # 基于知识图谱全图中心度检索宏观结构
+        if not getattr(self, "use_kg", False) or not self.kg:
+            return [{
+                "id": "global_fallback",
+                "text": "全局概览功能需要开启知识图谱 (USE_KG_RETRIEVAL=true)。当前仅支持局部精准检索。",
+                "metadata": {"source": "system", "scope": "global"},
+                "score": 1.0,
+            }]
 
-        source_best: dict[str, dict] = {}
-        for item in candidates:
-            source = (item.get("metadata") or {}).get("source")
-            if not source:
-                continue
-            if source not in source_best or item["score"] > source_best[source]["score"]:
-                source_best[source] = item
+        chunk_ids, subgraph_triples = self.kg.get_central_subgraph(
+            top_entities=5, max_triples=50, top_k=max_sources
+        )
 
-        ranked_sources = sorted(
-            source_best.values(), key=lambda x: x["score"], reverse=True
-        )[:max_sources]
+        subgraph_text = ""
+        if subgraph_triples:
+            lines = []
+            for t in subgraph_triples:
+                lines.append(f"({t['head']}) -[{t['relation']}]-> ({t['tail']})")
+            subgraph_text = "\n".join(lines)
 
         contexts: list[dict] = []
-        for item in ranked_sources:
-            source = item["metadata"]["source"]
-            full_path = Path(config.NOTES_DIR) / source
-            text = item["text"]
-            if full_path.exists():
-                try:
-                    text = full_path.read_text(encoding="utf-8")
-                except Exception as exc:
-                    logger.warning("读取文档失败 %s: %s", full_path, exc)
-            if max_chars > 0 and len(text) > max_chars:
-                text = text[:max_chars].rstrip() + "\n... [truncated]"
+        if subgraph_text:
+            contexts.append({
+                "id": "global_kg_macro",
+                "text": f"以下是整个知识库的宏观核心知识结构（核心实体关系）：\n{subgraph_text}",
+                "metadata": {"source": "Knowledge Graph Macro", "scope": "global", "score_type": "kg_centrality"},
+                "score": 1.0,
+            })
 
-            contexts.append(
-                {
-                    "id": f"doc::{source}",
-                    "text": text,
-                    "metadata": {
-                        "source": source,
-                        "scope": "global",
-                        "score_type": "rrf_position_score" if self.use_hybrid else "vector_similarity",
-                    },
-                    "score": item["score"],
-                }
-            )
+        if chunk_ids:
+            collection = self.parent_collection if getattr(self, "use_parent_child", False) else self.collection
+            results = collection.get(ids=chunk_ids[:max_sources], include=["documents", "metadatas"])
+            for doc_id, doc, meta in zip(results["ids"], results["documents"], results["metadatas"]):
+                if doc is None:
+                    continue
+                contexts.append({
+                    "id": doc_id,
+                    "text": doc,
+                    "metadata": {**(meta or {}), "scope": "global"},
+                    "score": 0.9,
+                })
 
         if config.INTENT_ROUTER_GLOBAL_MODE == "summary":
             summary = self._summarize_global_contexts(query, contexts)
             if summary:
-                source_list = [c["metadata"]["source"] for c in contexts]
+                source_list = [c.get("metadata", {}).get("source", "KG") for c in contexts]
                 return [
                     {
                         "id": "global_summary",
@@ -513,7 +505,7 @@ class Retriever:
                             "score_type": "derived_context_max_score",
                             "is_global_summary_block": True,
                         },
-                        "score": max((c["score"] for c in contexts), default=0.0),
+                        "score": 1.0,
                     }
                 ]
 
@@ -557,19 +549,6 @@ class Retriever:
     ) -> list[dict]:
         """
         Parent-Child 检索：从 child 候选中聚合 parent_id，获取 parent chunk。
-
-        流程：
-          1. 从 child_candidates 中提取 parent_id，保留最高分
-          2. 按分数排序，取 top PARENT_CHILD_MAX_PARENTS 个 parent
-          3. 从 parent_collection 批量获取 parent chunk 全文
-          4. 可选：对 parent chunk 做 Rerank
-          5. 返回 parent chunk 列表
-
-        Args:
-            child_candidates: 已从 child collection 召回的候选列表
-            query: 对齐后的查询文本
-            final_k: 最终返回的 context 数
-            use_rerank: 是否对 parent chunk 做 rerank
         """
         # ── 1. 聚合 parent_id，去重，取最高 child 分数 ──
         parent_scores: dict[str, float] = {}
@@ -590,7 +569,6 @@ class Retriever:
             parent_channels[parent_id].update(child.get("channels") or [])
 
         if not parent_scores:
-            # 没有 parent_id（可能是旧索引），降级返回 child 级结果
             logger.warning(
                 "Parent-Child 检索: 未找到任何 parent_id，降级为 child 级上下文"
             )
@@ -638,7 +616,6 @@ class Retriever:
                 "channel_scores": {},
             }
 
-        # 按原始排序构建结果列表
         parent_results: list[dict] = [
             parent_map[pid] for pid in sorted_parent_ids if pid in parent_map
         ]
@@ -652,12 +629,29 @@ class Retriever:
         if use_rerank and getattr(self, "use_reranker", False) and parent_results:
             from metrics import Timer
             with Timer() as t_rerank:
-                pairs = [[query, p["text"]] for p in parent_results]
-                batch_size = getattr(config, "RERANKER_BATCH_SIZE", 32)
-                scores = self.reranker.predict(pairs, batch_size=batch_size)
+                scores = [None] * len(parent_results)
+                uncached_pairs = []
+                uncached_indices = []
 
-                if isinstance(scores, float) or np.isscalar(scores):
-                    scores = [scores]
+                for i, p in enumerate(parent_results):
+                    doc_id = p["id"]
+                    cached_score = self.rerank_cache.get((query, doc_id))
+                    if cached_score is not None:
+                        scores[i] = cached_score
+                    else:
+                        uncached_pairs.append([query, p["text"]])
+                        uncached_indices.append(i)
+
+                if uncached_pairs:
+                    batch_size = getattr(config, "RERANKER_BATCH_SIZE", 32)
+                    batch_scores = self.reranker.predict(uncached_pairs, batch_size=batch_size)
+                    
+                    if isinstance(batch_scores, float) or np.isscalar(batch_scores):
+                        batch_scores = [batch_scores]
+                        
+                    for idx, score in zip(uncached_indices, batch_scores):
+                        scores[idx] = float(score)
+                        self.rerank_cache.put((query, parent_results[idx]["id"]), float(score))
 
                 for p, s in zip(parent_results, scores):
                     p["metadata"]["raw_rerank_logit"] = float(s)
@@ -729,6 +723,7 @@ class Retriever:
                 self.last_timing["rewritten_query"] = rewritten_query
                 query = rewritten_query
 
+        global_contexts = []
         if mode == "auto" and use_intent_router:
             route, route_info = self.intent_router.route(query)
             self.last_timing["route"] = route
@@ -740,17 +735,18 @@ class Retriever:
                 self.last_timing["aligned_query"] = aligned_query
                 self.last_timing["route_decision"] = "global"
                 with Timer() as t_embed:
+                    # 💡 Global RAG (KG Centrality) relies on exact entities, use original query
                     candidates = self._global_retrieve(
-                        aligned_query,
+                        query,
                         top_k=config.INTENT_ROUTER_GLOBAL_TOP_K,
                         max_sources=config.INTENT_ROUTER_GLOBAL_MAX_SOURCES,
                         max_chars=config.INTENT_ROUTER_GLOBAL_MAX_CHARS,
                     )
-                self.last_timing["embed_ms"] = t_embed.elapsed_ms
-                self.last_timing["mode"] = "global"
-                self.last_timing["rerank_active"] = False
-            # 💡 扩充出口载荷，透传 channels 和 channel_scores
-                return [
+                self.last_timing["global_ms"] = t_embed.elapsed_ms
+                self.last_timing["mode"] = "hybrid_global"
+                
+                # 💡 保存 Global Contexts（宏观骨架），但不 return，继续往下执行 Local Search 获取事实血肉
+                global_contexts = [
                     {
                         "text": c["text"], 
                         "metadata": c["metadata"], 
@@ -762,8 +758,10 @@ class Retriever:
                 ]
 
         aligned_query, _alignment = self._align_query(query, use_query_aligner=use_query_aligner)
-        self.last_timing["aligned_query"] = aligned_query
-        self.last_timing["route_decision"] = "local"
+        if "aligned_query" not in self.last_timing:
+            self.last_timing["aligned_query"] = aligned_query
+        if "route_decision" not in self.last_timing:
+            self.last_timing["route_decision"] = "local"
 
         if mode == "auto":
             mode = "hybrid" if use_hybrid else "vector"
@@ -771,10 +769,12 @@ class Retriever:
         # ── Embedding + 检索 ──
         with Timer() as t_embed:
             if mode == "bm25":
-                candidates = self._bm25_search(aligned_query, top_k)
+                # 💡 BM25 is highly sensitive to exact keywords, do NOT use keyword-stuffed aligned_query
+                candidates = self._bm25_search(query, top_k)
             elif mode == "hybrid":
+                # 💡 Vector gets the semantic-rich aligned_query. BM25 gets the crisp exact query.
                 vector_results = self._vector_search(aligned_query, top_k)
-                bm25_results = self._bm25_search(aligned_query, top_k)
+                bm25_results = self._bm25_search(query, top_k)
                 candidates = self._merge_candidates(
                     ("vector", vector_results),
                     ("bm25", bm25_results),
@@ -793,7 +793,8 @@ class Retriever:
         if use_kg:
             base_count = len(candidates)
             with Timer() as t_kg:
-                kg_candidates, subgraph_text = self._kg_search(aligned_query, config.KG_TOP_K, use_kg=use_kg)
+                # 💡 KG Traversal requires accurate entity matching, do NOT use aligned_query
+                kg_candidates, subgraph_text = self._kg_search(query, config.KG_TOP_K, use_kg=use_kg)
             self.last_timing["kg_ms"] = t_kg.elapsed_ms
             if kg_candidates:
                 candidates = self._merge_candidates(
@@ -818,13 +819,14 @@ class Retriever:
         use_parent_child = kwargs.get("use_parent_child", getattr(self, "use_parent_child", False))
         if use_parent_child and self.parent_collection is not None:
             parent_contexts = self._parent_child_retrieve(
-                candidates, aligned_query, final_k, use_rerank,
+                candidates, query, final_k, use_rerank,
             )
             self.last_timing["mode"] = mode
             self.last_timing["parent_child_active"] = True
-            # Parent-Child 模式下直接返回 parent 级上下文，跳过邻居扩展
-            parent_contexts_formatted = [
+            
+            candidates = [
                 {
+                    "id": c["id"],
                     "text": c["text"],
                     "metadata": c["metadata"],
                     "score": c["score"],
@@ -833,79 +835,70 @@ class Retriever:
                 }
                 for c in parent_contexts
             ]
-            
-            # 追加 KG 局部子图
-            if subgraph_text:
-                parent_contexts_formatted.append({
-                    "text": "以下是检索到的知识图谱相关子图：\n" + subgraph_text,
-                    "metadata": {"source": "Knowledge Graph Subgraph", "chunk_type": "kg_subgraph"},
-                    "score": 1.0,
-                    "channels": ["kg"],
-                    "channel_scores": {"kg": 1.0}
-                })
-            return parent_contexts_formatted
-
-        # ── Rerank ──
-        rerank_ms = 0.0
-        seed_candidates = candidates[:final_k]
-
-        if use_rerank and getattr(self, "use_reranker", False) and seed_candidates:
-            with Timer() as t_rerank:
-                scores = [None] * len(seed_candidates)
-                uncached_pairs = []
-                uncached_indices = []
-
-                # 1. 查询缓存 (LRU Cache拦截)
-                for i, c in enumerate(seed_candidates):
-                    doc_id = c["id"]
-                    cached_score = self.rerank_cache.get((aligned_query, doc_id))
-                    if cached_score is not None:
-                        scores[i] = cached_score
-                    else:
-                        uncached_pairs.append([aligned_query, c["text"]])
-                        uncached_indices.append(i)
-
-                # 2. 对未命中缓存的候选块进行矩阵式批量推理 (Batching)
-                if uncached_pairs:
-                    batch_size = getattr(config, "RERANKER_BATCH_SIZE", 32)
-                    batch_scores = self.reranker.predict(uncached_pairs, batch_size=batch_size)
-                    
-                    if isinstance(batch_scores, float) or np.isscalar(batch_scores):
-                        batch_scores = [batch_scores]
-                        
-                    for idx, score in zip(uncached_indices, batch_scores):
-                        scores[idx] = float(score)
-                        self.rerank_cache.put((aligned_query, seed_candidates[idx]["id"]), float(score))
-
-                # 3. 汇总与映射分数
-                for c, s in zip(seed_candidates, scores):
-                    c.setdefault("metadata", {})["raw_rerank_logit"] = float(s)
-                    c["metadata"]["score_type"] = "rerank_compressed_score"
-                    c["score"] = float(1 / (1 + np.exp(-s)))
-                
-                seed_candidates.sort(key=lambda x: x["score"], reverse=True)
-            rerank_ms = t_rerank.elapsed_ms
-            self.last_timing["rerank_active"] = True
+            self.last_timing["rerank_active"] = self.last_timing.get("rerank_active", False)
+            rerank_ms = self.last_timing.get("rerank_ms", 0.0)
         else:
-            self.last_timing["rerank_active"] = False
+            # ── Rerank ──
+            rerank_ms = 0.0
+            seed_candidates = candidates[:final_k]
 
-        expanded_neighbors = self._expand_neighbor_chunks(seed_candidates)
-        candidates = [*seed_candidates, *expanded_neighbors]
+            if use_rerank and getattr(self, "use_reranker", False) and seed_candidates:
+                with Timer() as t_rerank:
+                    scores = [None] * len(seed_candidates)
+                    uncached_pairs = []
+                    uncached_indices = []
 
-        deduped: list[dict] = []
-        seen_ids: set[str] = set()
-        for item in candidates:
-            doc_id = item["id"]
-            if doc_id in seen_ids:
-                continue
-            seen_ids.add(doc_id)
-            deduped.append(item)
-        candidates = deduped
+                    # 1. 查询缓存 (LRU Cache拦截)
+                    for i, c in enumerate(seed_candidates):
+                        doc_id = c["id"]
+                        cached_score = self.rerank_cache.get((query, doc_id))
+                        if cached_score is not None:
+                            scores[i] = cached_score
+                        else:
+                            uncached_pairs.append([query, c["text"]])
+                            uncached_indices.append(i)
+
+                    # 2. 对未命中缓存的候选块进行矩阵式批量推理 (Batching)
+                    if uncached_pairs:
+                        batch_size = getattr(config, "RERANKER_BATCH_SIZE", 32)
+                        batch_scores = self.reranker.predict(uncached_pairs, batch_size=batch_size)
+                        
+                        if isinstance(batch_scores, float) or np.isscalar(batch_scores):
+                            batch_scores = [batch_scores]
+                            
+                        for idx, score in zip(uncached_indices, batch_scores):
+                            scores[idx] = float(score)
+                            self.rerank_cache.put((query, seed_candidates[idx]["id"]), float(score))
+
+                    # 3. 汇总与映射分数
+                    for c, s in zip(seed_candidates, scores):
+                        c.setdefault("metadata", {})["raw_rerank_logit"] = float(s)
+                        c["metadata"]["score_type"] = "rerank_compressed_score"
+                        c["score"] = float(1 / (1 + np.exp(-s)))
+                    
+                    seed_candidates.sort(key=lambda x: x["score"], reverse=True)
+                rerank_ms = t_rerank.elapsed_ms
+                self.last_timing["rerank_active"] = True
+            else:
+                self.last_timing["rerank_active"] = False
+
+            expanded_neighbors = self._expand_neighbor_chunks(seed_candidates)
+            candidates = [*seed_candidates, *expanded_neighbors]
+
+            deduped: list[dict] = []
+            seen_ids: set[str] = set()
+            for item in candidates:
+                doc_id = item["id"]
+                if doc_id in seen_ids:
+                    continue
+                seen_ids.add(doc_id)
+                deduped.append(item)
+            candidates = deduped
 
         self.last_timing["rerank_ms"] = rerank_ms
         self.last_timing["mode"] = mode
 
-# 去掉内部 id 字段再返回
+        # 去掉内部 id 字段再返回，保证上下文连贯性
         local_contexts = self._sort_local_contexts(candidates)
         # 追加 KG 局部子图
         if subgraph_text:
@@ -917,8 +910,13 @@ class Retriever:
                 "channel_scores": {"kg": 1.0}
             })
 
+        final_contexts = []
+        # 将 Global 宏观摘要置于最顶部作为骨架
+        if global_contexts:
+            final_contexts.extend(global_contexts)
+
         # 💡 扩充出口载荷，确保精排、粗排后的多维通道特征完整流入 generator.py
-        return [
+        final_contexts.extend([
             {
                 "text": c["text"], 
                 "metadata": c["metadata"], 
@@ -927,7 +925,9 @@ class Retriever:
                 "channel_scores": c.get("channel_scores", {})
             }
             for c in local_contexts
-        ]
+        ])
+
+        return final_contexts
 
     def retrieve_with_trace(
         self,
