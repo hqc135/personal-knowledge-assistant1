@@ -1,63 +1,60 @@
 # 📚 Personal Knowledge Assistant
 
-基于 RAG 架构的个人知识库助手，支持混合检索（向量 + BM25 + RRF 融合）、CrossEncoder 重排序、流式生成，并内置 LLM-as-Judge 评估和消融实验框架。
+基于高阶 RAG 架构的个人知识库助手，内置了行业前沿的多种检索优化策略：包括层级切分、代码块隔离屏蔽、意图路由、查询对齐、混合检索（向量 + BM25 + KG）、CrossEncoder 重排序及流式生成。
 
-## ✨ 特性
+系统还自带了一套强大的 LLM-as-Judge 消融实验评估框架，并通过渐进式全链路的可观测仪表盘（Gradio UI）帮助开发者直观调优。
 
-- 🔍 **混合检索** — 向量检索 + BM25 关键词检索，RRF 融合排序
-- 🎯 **二阶段重排序** — CrossEncoder Reranker 精排
-- 🤖 **流式生成** — 基于 DeepSeek LLM，逐 token 实时输出
-- 📊 **可观测性仪表盘** — 各阶段延迟分解、趋势图、请求记录
-- 🧪 **消融实验** — 对比 5 种检索策略，LLM-as-Judge 三维度打分
-- ⚡ **增量索引** — 基于文件 hash，跳过未变更文件
-- 💾 **本地向量库** — ChromaDB 持久化，零运维
-- 🧠 **知识图谱增强** — LLM 抽取三元组，NetworkX 图谱检索补召回
-- 🌐 **查询对齐助手** — 路由后、检索前做中英术语对齐与受控扩展，保留原 query 兜底
+## ✨ 核心特性
 
-## 🏗️ 架构
+- 🔍 **混合架构检索 (Hybrid Search)** — 融合向量相似度、BM25 词频匹配与知识图谱关系检索，通过 RRF（Reciprocal Rank Fusion）统一排序融合。
+- 🎯 **二阶段精排 (Reranking)** — 借助 CrossEncoder 模型对粗召回结果进行高精度重排打分。
+- 🧱 **父子分层 RAG (Parent-Child Hierarchical RAG)** — 离线细粒度切块（Child），命中后动态召回大文本块（Parent），解决片段化语义丢失问题。
+- 🛡️ **结构感知代码 RAG (Structure-Aware Code RAG)** — 物理隔离 Markdown 代码块，避免纯自然语言正则误切；引入“断路器”机制智能跳过代码块的无效大模型图谱抽取。
+- 🧠 **知识图谱增强 (Knowledge Graph)** — 离线自动化抽取三元组建立图谱（NetworkX），在线通过实体提取进行两跳关系检索，极大提升推理型问题的召回能力。
+- 🧭 **意图路由 (Intent Router)** — 根据 Query 的原型向量聚类得分，智能切换“局部精确问答”与“全局总结”双重检索模式。
+- 🌐 **查询扩展管线 (Query Enhancements)** — 内置 Query Aligner（多语言术语对齐）与 Query Rewriter（上下文感知重写），保证召回词汇的结构精准度。
+- 📊 **可观测仪表盘 (Observability Dashboard)** — 内置 SVG 渲染引擎，实时拆解各阶段延迟（Routing/Retrieval/Rerank/Generation），方便性能调优。
+- 🧪 **自动化评估与消融 (Ablation Framework)** — 自带一键多线程跑批脚本，利用 LLM-as-Judge 从“检索相关度”、“回答忠实度”及“完整性”三个维度全方位输出数据报告。
 
-```
-Notes → Data Pipeline → ChromaDB ─┐
-                             ├→ Retriever (Vector/BM25/KG) → Reranker → Generator → Gradio
-KG Store ─────────────────────────┘
-Intent Router (Global/Local) ─────► Retriever
+## 🏗️ 架构图解
+
+```text
+Offline Data Pipeline:
+Notes ──> Semantic Chunker (w/ Code Shielding) ──> Parent/Child Split ──> ChromaDB
+                                              └──> LLM Extractor ───────> KG Store (NetworkX)
+
+Online Retrieval Flow:
+Query ──> Intent Router ──> Query Rewriter & Aligner ──> Multi-Way Retrieval ──> Reranker ──> Generator
+                                 ├── Vector Store (Child-to-Parent)
+                                 ├── BM25 Index
+                                 └── KG Graph Sub-network
 ```
 
 ## 📁 项目结构
 
 ```
 personal-knowledge-assistant/
-├── chroma_db/             # ChromaDB 持久化目录
-├── eval_reports/          # 消融实验报告
-├── notes/                 # Markdown 笔记示例
-├── tests/                 # 单元测试 (pytest)
-├── core/                  # 核心模块层（数据契约与管线编排）
-│   ├── schemas.py         # PipelineTrace, RetrievalResult
-│   └── pipeline.py        # RAGPipeline 组装
-├── retrieval/             # 检索子组件层
-│   ├── factory.py         # Retriever 依赖注入工厂
-│   ├── bm25_index.py      # BM25 关键词检索封装
-│   ├── reranker.py        # CrossEncoder + LRU 缓存
-│   └── neighbor_expander.py # 邻居块扩展
-├── ui/                    # 表现视图层
-│   ├── theme.py           # Gradio 主题、CSS 和颜色常量
-│   ├── chat_view.py       # 聊天 Tab UI 及响应格式化
-│   └── dashboard_view.py  # 仪表盘 Tab UI 及纯 SVG 图表生成
-├── config.py              # 集中配置管理（从 .env 加载）
-├── logger.py              # 统一日志配置
-├── metrics.py             # 可观测性（计时 + 指标收集）
-├── embedder.py            # Embedding 模块（智谱 API）
-├── data_pipeline.py       # 数据处理 + 增量索引
-├── retriever.py           # 混合检索向下兼容入口
-├── intent_router.py       # 意图路由（原型向量分类）
-├── generator.py           # LLM 生成（流式输出）
-├── kg_*.py                # 知识图谱三元组抽取与存储
-├── evaluator.py           # 评估（Embedding + LLM-as-Judge）
-├── ablation.py            # 消融实验脚本
-├── app.py                 # Gradio 应用入口（仅负责启动）
-├── Dockerfile             # Docker 一键部署
-├── .env.example           # 环境变量模板
-└── README.md
+├── chroma_db/             # ChromaDB 向量持久化目录
+├── eval_reports/          # JSON 格式的离线消融实验报告输出目录
+├── notes/                 # 你的个人 Markdown 笔记知识源
+├── tests/                 # Pytest 单元测试组件
+├── core/                  # 核心数据契约（Schema）与管线编排（Pipeline）
+├── retrieval/             # 细分检索策略（BM25, Reranker, 扩展器等）
+├── ui/                    # Gradio 视图层（聊天视图、主题、统计仪表盘）
+├── config.py              # `.env` 配置集中入口
+├── data_pipeline.py       # 核心离线处理器（含增量哈希、Chunking）
+├── parent_child_chunker.py# 专职处理父子块的层级切分器
+├── retriever.py           # 运行时混合召回总控入口
+├── intent_router.py       # Query 意图分类与多路分发
+├── query_aligner.py       # 术语级对齐模块
+├── query_rewriter.py      # LLM 意图改写模块
+├── kg_*.py                # 知识图谱三元组抽取、存储与检索系列
+├── generator.py           # LLM 流式问答生成器
+├── evaluator.py           # LLM-as-Judge 与 Embedding 打分器
+├── ablation.py            # 多维消融实验并发脚本
+├── app.py                 # Gradio Web 界面主入口
+├── Dockerfile             # 容器化部署脚本
+└── .env.example           # 环境变量参考模板
 ```
 
 ## 🚀 快速开始
@@ -67,29 +64,48 @@ personal-knowledge-assistant/
 ```bash
 git clone https://github.com/hqc135/personal-knowledge-assistant1
 cd personal-knowledge-assistant1
-python -m venv venv && venv\Scripts\activate  # Windows
+python -m venv .venv
+# 激活虚拟环境 (Windows)
+.\.venv\Scripts\activate  
+# 安装依赖
 pip install -r requirements.txt
 ```
 
-### 2. 配置 API Key
+### 2. 配置环境变量
 
+复制并编辑 `.env` 文件：
 ```bash
 cp .env.example .env
-# 编辑 .env，填入 ZHIPUAI_API_KEY 和 DEEPSEEK_API_KEY
 ```
+填入你的 `ZHIPUAI_API_KEY`（用于 Embeddings）和 `DEEPSEEK_API_KEY`（用于检索重写与回答生成）。
 
-### 3. 构建索引 & 启动
+### 3. 构建索引并启动
 
+当你首次运行或放入了新的笔记时，需要运行管线构建索引与图谱：
 ```bash
-python data_pipeline.py   # 构建/增量更新索引
-python app.py              # 启动应用 → http://localhost:7860
+python data_pipeline.py
 ```
+> **提示**：如果调整了底层切分策略（如代码盾牌或父子分块），建议先删除 `./chroma_db` 与 `./kg_triples.json` 后再运行上条命令强制重构。
 
-## 🧪 测试
+启动基于 Gradio 的对话与监控面板：
+```bash
+python app.py
+```
+打开浏览器访问 [http://localhost:7860](http://localhost:7860) 即可开始使用。
 
+## 🧪 测试与评估
+
+**运行单元测试**：
 ```bash
 pytest -v
 ```
+
+**运行消融实验**：
+系统自带的 `ablation.py` 会对比多种架构（从 Base Vector Only 到 Full Pipeline），并测试父子检索和图谱增强的效能差异：
+```bash
+python ablation.py
+```
+*实验结果会自动打印在控制台，并将带有详细分数的 JSON 报告留存在 `eval_reports/` 目录下。*
 
 ## 🐳 Docker 部署
 
@@ -98,72 +114,12 @@ docker build -t knowledge-assistant .
 docker run -p 7860:7860 --env-file .env knowledge-assistant
 ```
 
-## 📊 消融实验
+## 📝 高阶调优说明
 
-对齐主链路（含路由/KG/邻居扩展）的消融对比，使用 Embedding 相似度 + LLM-as-Judge 三维度评估：
-
-```bash
-python ablation.py
-```
-
-输出示例：
-
-```
-📊 消融实验结果对比
-══════════════════════════════════════════════════
-实验                    Emb Rel  Emb Faith  LLM Rel LLM Faith  LLM Comp
-──────────────────────────────────────────────────
-Auto (Main Pipeline)     0.6500     0.8200      4.2       4.4       4.1 ★
-Auto (No Intent Router)  0.6200     0.7800      3.4       3.8       3.4
-Vector Only              0.6234     0.7102      3.0       3.7       3.3
-Vector + Reranker        0.6891     0.7503      3.7       4.0       3.7
-BM25 Only                0.5102     0.6201      2.3       3.3       2.7
-Hybrid (RRF)             0.7012     0.7601      4.0       4.0       4.0
-Hybrid + Reranker        0.7234     0.7890      4.3       4.3       4.3
-══════════════════════════════════════════════════
-```
-
-详细 JSON 报告保存在 `eval_reports/` 目录。
-
-## 🛠️ 技术栈
-
-| 组件 | 技术选型 | 说明 |
-|------|---------|------|
-| Embedding | 智谱 `embedding-3` API | 高质量中文向量化 (1024 维) |
-| BM25 | `rank_bm25` + `jieba` | 关键词检索，jieba 中文分词 |
-| 融合排序 | RRF (Reciprocal Rank Fusion) | 多路检索结果融合 |
-| Reranker | `BAAI/bge-reranker-v2-m3` | 交叉编码器精排 |
-| Vector DB | ChromaDB | 本地持久化，零运维 |
-| Knowledge Graph | NetworkX + JSON | 图谱检索，补充结构化召回 |
-| LLM | deepseek-v4-flash | OpenAI 兼容接口 |
-| 评估 | LLM-as-Judge + Embedding | 三维度自动化评估 |
-| Frontend | Gradio (Blocks) | 聊天 + 可观测性仪表盘 |
-
-## 📝 设计决策
-
-- **分层解耦架构**: 拆分出 `core`、`retrieval`、`ui` 层，将数据契约、子组件、视图逻辑与应用入口分离，提高了模块内聚度并极大简化了 `app.py`
-- **混合检索 (Hybrid Search)**: 纯语义检索对精确关键词弱，BM25 补充关键词匹配，RRF 融合两路结果
-- **两阶段排序**: 先多路召回 top-5，再 Rerank 取 top-3，平衡召回率和精准度
-- **LLM-as-Judge**: 从检索相关性、回答忠实度、回答完整度三个维度自动化评估
-- **消融实验**: 对比 5 种策略组合，用数据支撑技术选型决策
-- **可观测性**: 全链路计时，各阶段延迟可视化，便于性能调优
-- **增量索引**: 文件 MD5 hash 追踪，避免重复 API 调用
-- **KG 增强**: 抽取三元组并存储为 JSON，检索时从图谱召回关联 chunk
-- **意图路由**: 基于原型向量分类，低置信度回退到本地检索链路
-- **查询对齐助手**: 先经过 Intent Router，再在 Vector/BM25/KG 之前做中英术语对齐；若命中规则门控失败、长度过短、像代码/路径或 LLM 低置信度，则确定性回退到原始 query
-
-## ⚙️ KG 配置
-
-KG 相关参数已集中在 `.env` / `config.py`。需要时只修改 `USE_KG_EXTRACTION`、`USE_KG_RETRIEVAL` 以及 `KG_*` 参数即可。
-
-## 🧭 意图路由配置
-
-意图路由默认开启，参数集中在 `.env` / `config.py`。通常只需调整 `USE_INTENT_ROUTER`、`INTENT_ROUTER_*` 的阈值与全局模式。
-
-## 🌐 查询对齐配置
-
-查询对齐助手默认开启，参数集中在 `.env` / `config.py`。通常只需调整 `USE_QUERY_ALIGNER`、`QUERY_ALIGNER_*` 的阈值与扩展条数。它只在 Intent Router 之后、进入 Vector / BM25 / KG 之前运行。
+所有的阈值与开关都在 `.env` (并由 `config.py` 解析) 中：
+- **层级架构**：调整 `USE_PARENT_CHILD` 和 Chunk 大小限制。
+- **知识图谱**：调整 `USE_KG_EXTRACTION` / `USE_KG_RETRIEVAL`，并可限制最大跳数 `KG_MAX_HOPS`。
+- **查询处理**：通过 `USE_INTENT_ROUTER`、`USE_QUERY_ALIGNER` 改变前置的请求干预力度。
 
 ## 📄 License
-
 MIT

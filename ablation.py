@@ -42,6 +42,7 @@ class Experiment(TypedDict):
     use_query_aligner: bool
     use_query_rewriter: bool
     use_hybrid: bool
+    use_parent_child: bool
 
 EXPERIMENTS: list[Experiment] = [
     {
@@ -53,6 +54,7 @@ EXPERIMENTS: list[Experiment] = [
         "use_query_aligner": False,
         "use_query_rewriter": False,
         "use_hybrid": False,
+        "use_parent_child": False,
     },
     {
         "name": "Base + Hybrid",
@@ -63,6 +65,7 @@ EXPERIMENTS: list[Experiment] = [
         "use_query_aligner": False,
         "use_query_rewriter": False,
         "use_hybrid": True,
+        "use_parent_child": False,
     },
     {
         "name": "Base + Hybrid + Reranker",
@@ -73,6 +76,7 @@ EXPERIMENTS: list[Experiment] = [
         "use_query_aligner": False,
         "use_query_rewriter": False,
         "use_hybrid": True,
+        "use_parent_child": False,
     },
     {
         "name": "Base + Hybrid + Reranker + KG",
@@ -83,6 +87,7 @@ EXPERIMENTS: list[Experiment] = [
         "use_query_aligner": False,
         "use_query_rewriter": False,
         "use_hybrid": True,
+        "use_parent_child": False,
     },
     {
         "name": "Base + H + R + KG + Aligner",
@@ -93,6 +98,7 @@ EXPERIMENTS: list[Experiment] = [
         "use_query_aligner": True,
         "use_query_rewriter": False,
         "use_hybrid": True,
+        "use_parent_child": False,
     },
     {
         "name": "Base + H + R + KG + Aligner + Rewriter",
@@ -103,6 +109,7 @@ EXPERIMENTS: list[Experiment] = [
         "use_query_aligner": True,
         "use_query_rewriter": True,
         "use_hybrid": True,
+        "use_parent_child": False,
     },
     {
         "name": "Full Pipeline (Auto Mode)",
@@ -113,6 +120,7 @@ EXPERIMENTS: list[Experiment] = [
         "use_query_aligner": True,
         "use_query_rewriter": True,
         "use_hybrid": True,
+        "use_parent_child": True,
     },
     {
         "name": "Full w/o Intent Router",
@@ -123,6 +131,7 @@ EXPERIMENTS: list[Experiment] = [
         "use_query_aligner": True,
         "use_query_rewriter": True,
         "use_hybrid": True,
+        "use_parent_child": True,
     },
     {
         "name": "Full w/o KG",
@@ -133,6 +142,7 @@ EXPERIMENTS: list[Experiment] = [
         "use_query_aligner": True,
         "use_query_rewriter": True,
         "use_hybrid": True,
+        "use_parent_child": True,
     },
     {
         "name": "Full w/o Query Aligner",
@@ -143,6 +153,7 @@ EXPERIMENTS: list[Experiment] = [
         "use_query_aligner": False,
         "use_query_rewriter": True,
         "use_hybrid": True,
+        "use_parent_child": True,
     },
     {
         "name": "Full w/o Query Rewriter",
@@ -153,6 +164,18 @@ EXPERIMENTS: list[Experiment] = [
         "use_query_aligner": True,
         "use_query_rewriter": False,
         "use_hybrid": True,
+        "use_parent_child": True,
+    },
+    {
+        "name": "Full w/o Parent-Child",
+        "mode": "auto",
+        "rerank": True,
+        "use_intent_router": True,
+        "use_kg": True,
+        "use_query_aligner": True,
+        "use_query_rewriter": True,
+        "use_hybrid": True,
+        "use_parent_child": False,
     },
 ]
 
@@ -174,7 +197,8 @@ def _run_single_experiment(exp: Experiment, cases: list[dict], use_llm_judge: bo
             use_kg=exp["use_kg"],
             use_intent_router=exp["use_intent_router"],
             use_query_aligner=exp["use_query_aligner"],
-            use_query_rewriter=exp["use_query_rewriter"]
+            use_query_rewriter=exp["use_query_rewriter"],
+            use_parent_child=exp.get("use_parent_child", False)
         )
     except Exception as e:
         logger.error("实验 %s 运行失败: %s", exp["name"], e)
