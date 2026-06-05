@@ -1,23 +1,260 @@
 """
 数据处理 Pipeline：加载 Markdown、分块、Embedding、写入向量库
 支持增量索引（基于文件 hash，只处理变更文件）
+
+分块策略：
+  - 默认：SemanticChunker（语义梯度阈值切块）
+  - 降级：RecursiveCharacterTextSplitter（固定字符窗口，fallback）
 """
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
+from typing import Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import numpy as np
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 import chromadb
 from embedder import ZhipuEmbedder
+from kg_extractor import extract_triples
+from kg_store import append_triples
 import config
+from parent_child_chunker import ParentChildChunker
 
 logger = logging.getLogger(__name__)
 
 # 索引元数据文件，记录每个文件的 hash
 _INDEX_META_PATH = Path(config.CHROMA_DB_PATH) / ".index_meta.json"
 
+# ──────────────────────────────────────────────────────────────────────────────
+# 句子拆分正则（中英文混合 + Markdown）
+# ──────────────────────────────────────────────────────────────────────────────
+_SENT_SPLIT_RE = re.compile(
+    r"(?<=[。！？!?])"          # 中英文句末标点（后向断言）
+    r"|(?<=\n\n)"               # 连续空行（Markdown 段落边界）
+    r"|(?<=\n)(?=#{1,6}\s)"     # Markdown 标题行之前
+    r"|(?<=[.!?][ \t])(?=[A-Z])",  # 英文句点 + 空格 + 大写首字（英文句尾）
+)
+
+
+class SemanticChunker:
+    """
+    基于余弦相似度梯度的语义分块器。
+
+    算法流程：
+      1. 正则拆分句子
+      2. 滑动窗口平滑句向量（降低单句噪声）
+      3. 计算相邻句向量余弦相似度
+      4. 百分位阈值检测语义断点（话题转移）
+      5. 合并过小碎片 / 强制拆分过大 chunk
+    """
+
+    def __init__(self, embedder: ZhipuEmbedder):
+        self.embedder = embedder
+        self.percentile = config.SEMANTIC_BREAKPOINT_PERCENTILE
+        self.window = config.SEMANTIC_WINDOW_SIZE
+        self.min_size = config.SEMANTIC_MIN_CHUNK_SIZE
+        self.max_size = config.SEMANTIC_MAX_CHUNK_SIZE
+
+    # ── 公共入口 ──────────────────────────────────────────────────────────────
+
+    def split_text(self, text: str) -> list[dict]:
+        """将一段文本切分为语义连贯的 chunk 列表，返回带元数据的字典列表。"""
+        sentences = self._sentence_split(text)
+
+        if len(sentences) < 3:
+            # 文档过短，无需相似度计算
+            return self._build_single_chunk(sentences)
+
+        try:
+            vecs = self._windowed_embed(sentences)
+            sims = self._cosine_sims(vecs)
+            breakpoints = self._find_breakpoints(sims)
+            chunks = self._build_chunks(sentences, breakpoints)
+            return chunks
+        except Exception as exc:
+            logger.warning(
+                "SemanticChunker 内部异常，跳过语义计算直接返回原文: %s", exc
+            )
+            return self._build_single_chunk(sentences)
+
+    def _build_single_chunk(self, sentences: list[dict]) -> list[dict]:
+        if not sentences:
+            return []
+        text = " ".join([s["text"] for s in sentences]).strip()
+        if not text:
+            return []
+        is_code = all(s["is_code"] for s in sentences)
+        lang = sentences[0]["code_language"] if is_code and sentences else None
+        return [{"text": text, "is_code": is_code, "code_language": lang}]
+
+    # ── 句子拆分 ──────────────────────────────────────────────────────────────
+
+    def _sentence_split(self, text: str) -> list[dict]:
+        """按标点 / 段落边界拆分，使用交替隔离块技术保护 Markdown 代码片段作为原子。"""
+        import re
+        code_block_pattern = re.compile(r"(```[a-zA-Z0-9+#\-\.]*\n[\s\S]*?```)", re.MULTILINE)
+        parts = code_block_pattern.split(text)
+        sentences = []
+        
+        for part in parts:
+            if part.startswith("```") and part.endswith("```"):
+                lines = part.split("\n", 1)
+                lang = ""
+                if len(lines) > 1:
+                    lang = lines[0][3:].strip()
+                sentences.append({"text": part, "is_code": True, "code_language": lang})
+            else:
+                sub_parts = _SENT_SPLIT_RE.split(part)
+                for sp in sub_parts:
+                    sp = sp.strip()
+                    if len(sp) >= 5:
+                        sentences.append({"text": sp, "is_code": False, "code_language": None})
+        return sentences
+
+    # ── 向量计算 ──────────────────────────────────────────────────────────────
+
+    def _windowed_embed(self, sentences: list[dict]) -> np.ndarray:
+        """
+        批量 Embed 所有句子，再做滑动窗口平均平滑。
+        返回归一化后的向量矩阵 (N, D)。
+        """
+        texts = [s["text"] for s in sentences]
+        vecs = self.embedder.encode(texts, normalize_embeddings=True)  # (N, D)
+        half = self.window // 2
+        smoothed = []
+        for i in range(len(vecs)):
+            lo = max(0, i - half)
+            hi = min(len(vecs), i + half + 1)
+            smoothed.append(vecs[lo:hi].mean(axis=0))
+        smoothed = np.array(smoothed, dtype=np.float32)
+        # 重新归一化（平均后模长变化）
+        norms = np.linalg.norm(smoothed, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1, norms)
+        return smoothed / norms
+
+    @staticmethod
+    def _cosine_sims(vecs: np.ndarray) -> np.ndarray:
+        """
+        计算相邻句向量的余弦相似度。
+        向量已归一化，点积即余弦，返回长度 N-1 的数组。
+        """
+        return (vecs[:-1] * vecs[1:]).sum(axis=1)
+
+    # ── 断点检测 ──────────────────────────────────────────────────────────────
+
+    def _find_breakpoints(self, sims: np.ndarray) -> list[int]:
+        """
+        以第 percentile 百分位相似度为阈值，低于该值的位置即为语义断点。
+        返回断点索引列表（断点 i 表示在 sentence[i] 和 sentence[i+1] 之间切）。
+        """
+        threshold = float(np.percentile(sims, self.percentile))
+        return [i for i, s in enumerate(sims) if s < threshold]
+
+    # ── chunk 组装 ────────────────────────────────────────────────────────────
+
+    def _build_chunks(
+        self, sentences: list[dict], breakpoints: list[int]
+    ) -> list[dict]:
+        """
+        按断点将句子列表合并为 chunk，再执行：
+          - 过小合并（< min_size）
+          - 过大拆分（> max_size）
+        """
+        bp_set = set(breakpoints)
+        raw_chunks: list[list[dict]] = []
+        current: list[dict] = []
+
+        for i, sent in enumerate(sentences):
+            current.append(sent)
+            
+            # 断点在 i 处，或者前后 is_code 状态发生变化时，强制切断
+            force_cut = False
+            if i < len(sentences) - 1:
+                if sent["is_code"] != sentences[i+1]["is_code"]:
+                    force_cut = True
+                    
+            if (i in bp_set or force_cut) and i < len(sentences) - 1:
+                raw_chunks.append(current)
+                current = []
+        if current:
+            raw_chunks.append(current)
+
+        # 合并过小碎片
+        merged = self._merge_small(raw_chunks)
+        # 拆分过大单体
+        result: list[dict] = []
+        for chunk_sents in merged:
+            text = " ".join([s["text"] for s in chunk_sents])
+            if len(text) > self.max_size:
+                result.extend(self._split_oversized(chunk_sents))
+            else:
+                if text.strip():
+                    is_code = all(s["is_code"] for s in chunk_sents)
+                    lang = chunk_sents[0]["code_language"] if is_code and chunk_sents else None
+                    result.append({"text": text.strip(), "is_code": is_code, "code_language": lang})
+        return result
+
+    def _merge_small(self, chunks: list[list[dict]]) -> list[list[dict]]:
+        """将字符数不足 min_size 的 chunk 向前合并，但禁止代码块与普通文本混合。"""
+        merged: list[list[dict]] = []
+        for sents in chunks:
+            if not merged:
+                merged.append(list(sents))
+                continue
+                
+            prev_text = " ".join([s["text"] for s in merged[-1]])
+            prev_is_code = all(s["is_code"] for s in merged[-1])
+            curr_is_code = all(s["is_code"] for s in sents)
+            
+            if len(prev_text) < self.min_size and prev_is_code == curr_is_code:
+                merged[-1].extend(sents)
+            else:
+                merged.append(list(sents))
+        return merged
+
+    def _split_oversized(self, sentences: list[dict]) -> list[dict]:
+        """
+        对超过 max_size 的 chunk 按句子列表二分递归拆分。
+        最小粒度为单句（不再下钻），防止无限递归。
+        针对代码块实施原子物理保护，拒绝裁切。
+        """
+        if len(sentences) <= 1:
+            sent = sentences[0] if sentences else None
+            if not sent:
+                return []
+            text = sent["text"]
+            # 代码块硬切豁免
+            if sent["is_code"]:
+                return [{"text": text.strip(), "is_code": True, "code_language": sent["code_language"]}]
+            
+            # 自然语言硬切保底
+            return [
+                {"text": text[i: i + self.max_size].strip(), "is_code": False, "code_language": None}
+                for i in range(0, len(text), self.max_size)
+                if text[i: i + self.max_size].strip()
+            ]
+        mid = len(sentences) // 2
+        left = sentences[:mid]
+        right = sentences[mid:]
+        result: list[dict] = []
+        for half in (left, right):
+            text = " ".join([s["text"] for s in half])
+            if len(text) > self.max_size:
+                result.extend(self._split_oversized(half))
+            elif text.strip():
+                is_code = all(s["is_code"] for s in half)
+                lang = half[0]["code_language"] if is_code and half else None
+                result.append({"text": text.strip(), "is_code": is_code, "code_language": lang})
+        return result
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Document Processor
+# ──────────────────────────────────────────────────────────────────────────────
 
 class DocumentProcessor:
     def __init__(self):
@@ -27,11 +264,69 @@ class DocumentProcessor:
             name=config.COLLECTION_NAME,
             metadata={"hf_space": "personal_kb"}
         )
-        self.splitter = RecursiveCharacterTextSplitter(
+
+        # ── Parent-Child 模式 ──
+        self.use_parent_child = config.USE_PARENT_CHILD
+        if self.use_parent_child:
+            self.parent_collection = self.client.get_or_create_collection(
+                name=config.PARENT_COLLECTION_NAME,
+                metadata={"hf_space": "personal_kb_parents"},
+            )
+            self._pc_chunker = ParentChildChunker(self.embedder)
+            logger.info(
+                "Parent-Child 分层分块已启用（parent=%d~%d, child=%d~%d）",
+                config.PARENT_CHUNK_MIN_SIZE,
+                config.PARENT_CHUNK_MAX_SIZE,
+                config.CHILD_CHUNK_MIN_SIZE,
+                config.CHILD_CHUNK_MAX_SIZE,
+            )
+        else:
+            self.parent_collection = None
+            self._pc_chunker = None
+
+        # 根据配置选择分块器
+        if config.SEMANTIC_CHUNKER_ENABLED:
+            logger.info(
+                "语义分块已启用（percentile=%.0f, window=%d, min=%d, max=%d）",
+                config.SEMANTIC_BREAKPOINT_PERCENTILE,
+                config.SEMANTIC_WINDOW_SIZE,
+                config.SEMANTIC_MIN_CHUNK_SIZE,
+                config.SEMANTIC_MAX_CHUNK_SIZE,
+            )
+            self._semantic_chunker: Optional[SemanticChunker] = SemanticChunker(
+                self.embedder
+            )
+        else:
+            self._semantic_chunker = None
+            logger.info("语义分块已关闭，使用 RecursiveCharacterTextSplitter 作为后备")
+
+        # fallback splitter（语义模式下异常降级时使用）
+        self._fallback_splitter = RecursiveCharacterTextSplitter(
             chunk_size=config.CHUNK_SIZE,
             chunk_overlap=config.CHUNK_OVERLAP,
-            separators=["\n## ", "\n### ", "\n\n", "\n", "。", ""]
+            separators=["\n## ", "\n### ", "\n\n", "\n", "。", ""],
         )
+
+    def _split_document(self, text: str, source: str) -> tuple[list[dict], str]:
+        """
+        对单篇文档执行分块，返回 (chunks, chunker_name)。
+        优先语义分块，失败时自动降级至字符切块。
+        """
+        if self._semantic_chunker is not None:
+            try:
+                chunks = self._semantic_chunker.split_text(text)
+                if chunks:
+                    return chunks, "semantic"
+                # split_text 返回空列表时视为异常
+                logger.warning("语义分块返回空结果，降级处理文件: %s", source)
+            except Exception as exc:
+                logger.warning(
+                    "语义分块失败，降级至字符切块 [%s]: %s", source, exc
+                )
+
+        # fallback
+        fallback_chunks = self._fallback_splitter.split_text(text)
+        return [{"text": c, "is_code": False, "code_language": None} for c in fallback_chunks], "recursive"
 
     @staticmethod
     def _file_hash(path: Path) -> str:
@@ -44,7 +339,6 @@ class DocumentProcessor:
         用相对路径生成唯一 chunk ID，避免不同子目录同名文件碰撞。
         例: notes/sub1/design.md chunk 0 → "sub1_design_0"
         """
-        # 将路径分隔符和 .md 后缀去掉，用下划线连接
         parts = list(relative_path.with_suffix("").parts)
         return "_".join(parts) + f"_{chunk_index}"
 
@@ -62,15 +356,60 @@ class DocumentProcessor:
             encoding="utf-8",
         )
 
-    def load_markdown_dir(self, dir_path: str, incremental: bool = True) -> list[dict]:
+    def load_markdown_dir(self, dir_path: str, incremental: bool = True) -> list[dict] | tuple[list[dict], list[dict]]:
         """
         递归加载目录下所有 markdown 文件。
         incremental=True 时只处理新增/变更的文件。
+
+        返回值：
+          - 非 Parent-Child 模式：list[dict]（与以前一致）
+          - Parent-Child 模式：(parent_docs, child_docs) 二元组
         """
         dir_path_obj = Path(dir_path)
         all_files = list(dir_path_obj.rglob("*.md"))
         index_meta = self._load_index_meta() if incremental else {}
 
+        # Parent-Child 模式
+        if self.use_parent_child:
+            all_parents: list[dict] = []
+            all_children: list[dict] = []
+            updated_meta: dict[str, str] = {}
+            skipped = 0
+
+            for path in all_files:
+                relative = path.relative_to(dir_path_obj)
+                file_key = str(relative)
+                current_hash = self._file_hash(path)
+                updated_meta[file_key] = current_hash
+
+                if incremental and index_meta.get(file_key) == current_hash:
+                    skipped += 1
+                    continue
+
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except Exception as e:
+                    logger.error("读取文件失败 %s: %s", path, e)
+                    continue
+
+                parents, children = self._pc_chunker.split_document(
+                    text, str(relative)
+                )
+                all_parents.extend(parents)
+                all_children.extend(children)
+
+            if skipped:
+                logger.info("跳过 %d 个未变更文件", skipped)
+            logger.info(
+                "Parent-Child 待索引: %d 个文件, %d parents, %d children",
+                len(all_files) - skipped,
+                len(all_parents),
+                len(all_children),
+            )
+            self._save_index_meta(updated_meta)
+            return all_parents, all_children
+
+        # ── 原有逻辑（非 Parent-Child 模式） ──
         docs = []
         updated_meta: dict[str, str] = {}
         skipped = 0
@@ -92,15 +431,22 @@ class DocumentProcessor:
                 logger.error("读取文件失败 %s: %s", path, e)
                 continue
 
-            chunks = self.splitter.split_text(text)
-            for i, chunk in enumerate(chunks):
+            chunks, chunker_name = self._split_document(text, str(relative))
+            for i, chunk_dict in enumerate(chunks):
+                meta = {
+                    "source": str(relative),
+                    "chunk_index": i,
+                    "chunker": chunker_name,   # 记录实际使用的分块器
+                }
+                if chunk_dict.get("is_code"):
+                    meta["is_code"] = True
+                    if chunk_dict.get("code_language"):
+                        meta["code_language"] = chunk_dict["code_language"]
+                
                 docs.append({
                     "id": self._make_chunk_id(relative, i),
-                    "text": chunk,
-                    "metadata": {
-                        "source": str(relative),
-                        "chunk_index": i,
-                    }
+                    "text": chunk_dict["text"],
+                    "metadata": meta
                 })
 
         if skipped:
@@ -112,8 +458,22 @@ class DocumentProcessor:
 
         return docs
 
-    def index(self, docs: list):
-        """批量 embedding 并写入 ChromaDB"""
+    def index(self, docs):
+        """
+        批量 embedding 并写入 ChromaDB。
+
+        docs 可以是：
+          - list[dict]：传统单层 chunk 列表
+          - tuple[list[dict], list[dict]]：(parent_docs, child_docs) 二元组
+            （Parent-Child 模式下由 load_markdown_dir 返回）
+        """
+        # ── Parent-Child 模式 ──
+        if isinstance(docs, tuple) and len(docs) == 2:
+            parent_docs, child_docs = docs
+            self._index_parent_child(parent_docs, child_docs)
+            return
+
+        # ── 原有逻辑（非 Parent-Child 模式） ──
         if not docs:
             logger.info("没有需要索引的文档")
             return
@@ -136,6 +496,93 @@ class DocumentProcessor:
             metadatas=metadatas,
         )
         logger.info("索引完成: %d chunks 已写入", len(docs))
+
+        self._extract_kg_triples(docs)
+
+    def _index_parent_child(
+        self,
+        parent_docs: list[dict],
+        child_docs: list[dict],
+    ):
+        """分别将 parent 和 child docs 写入各自的 ChromaDB collection。"""
+        if not parent_docs and not child_docs:
+            logger.info("Parent-Child: 没有需要索引的文档")
+            return
+
+        # ── 索引 Parent ──
+        if parent_docs:
+            p_texts = [d["text"] for d in parent_docs]
+            p_ids = [d["id"] for d in parent_docs]
+            p_metas = [d["metadata"] for d in parent_docs]
+
+            logger.info("正在生成 Parent Embedding (%d parents)...", len(p_texts))
+            p_embeddings = self.embedder.encode(
+                p_texts, normalize_embeddings=True
+            ).tolist()
+
+            self.parent_collection.upsert(
+                ids=p_ids,
+                documents=p_texts,
+                embeddings=p_embeddings,
+                metadatas=p_metas,
+            )
+            logger.info("Parent 索引完成: %d parents 已写入", len(parent_docs))
+
+        # ── 索引 Child ──
+        if child_docs:
+            c_texts = [d["text"] for d in child_docs]
+            c_ids = [d["id"] for d in child_docs]
+            c_metas = [d["metadata"] for d in child_docs]
+
+            logger.info("正在生成 Child Embedding (%d children)...", len(c_texts))
+            c_embeddings = self.embedder.encode(
+                c_texts, normalize_embeddings=True
+            ).tolist()
+
+            self.collection.upsert(
+                ids=c_ids,
+                documents=c_texts,
+                embeddings=c_embeddings,
+                metadatas=c_metas,
+            )
+            logger.info("Child 索引完成: %d children 已写入", len(child_docs))
+
+        # KG 三元组抽取（基于 parent 粒度，上下文更完整）
+        self._extract_kg_triples(parent_docs)
+
+    def _extract_kg_triples(self, docs: list[dict]):
+        """对文档列表执行 KG 三元组抽取（若启用）。"""
+        if not config.USE_KG_EXTRACTION or not docs:
+            return
+
+        workers = config.KG_EXTRACTION_WORKERS
+        logger.info(
+            "开始并发抽取知识图谱三元组（workers=%d, chunks=%d）...",
+            workers, len(docs),
+        )
+        all_triples: list[dict] = []
+
+        def _extract_one(doc: dict) -> list[dict]:
+            if doc.get("metadata", {}).get("is_code"):
+                return []
+            return extract_triples(
+                doc["text"],
+                source=doc["metadata"]["source"],
+                chunk_id=doc["id"],
+            )
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_extract_one, doc): doc for doc in docs}
+            for future in as_completed(futures):
+                doc = futures[future]
+                try:
+                    triples = future.result()
+                    all_triples.extend(triples)
+                except Exception as exc:
+                    logger.warning("三元组抽取失败 %s: %s", doc["id"], exc)
+
+        added = append_triples(all_triples)
+        logger.info("三元组写入完成: 新增 %d 条", added)
 
 
 if __name__ == "__main__":

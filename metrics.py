@@ -31,6 +31,7 @@ class RequestMetrics:
     # 各阶段耗时 (ms)
     embed_ms: float = 0.0
     search_ms: float = 0.0
+    align_ms: float = 0.0
     rerank_ms: float = 0.0
     generate_ms: float = 0.0
     total_ms: float = 0.0
@@ -66,6 +67,7 @@ class MetricsCollector:
                 "avg_total_ms": 0,
                 "avg_embed_ms": 0,
                 "avg_search_ms": 0,
+                "avg_align_ms": 0,
                 "avg_rerank_ms": 0,
                 "avg_generate_ms": 0,
                 "p95_total_ms": 0,
@@ -77,6 +79,7 @@ class MetricsCollector:
             "avg_total_ms": float(np.mean(totals)),
             "avg_embed_ms": float(np.mean([m.embed_ms for m in h])),
             "avg_search_ms": float(np.mean([m.search_ms for m in h])),
+            "avg_align_ms": float(np.mean([m.align_ms for m in h])),
             "avg_rerank_ms": float(np.mean([m.rerank_ms for m in h])),
             "avg_generate_ms": float(np.mean([m.generate_ms for m in h])),
             "p95_total_ms": float(np.percentile(totals, 95)),

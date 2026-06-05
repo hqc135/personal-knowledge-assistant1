@@ -59,13 +59,16 @@ class ZhipuEmbedder:
         self, texts: list[str], max_retries: int = 3
     ) -> list[list[float]]:
         """调用智谱 Embedding API，带指数退避重试"""
+        # 过滤空字符串，避免 API 返回 400 参数错误
+        safe_texts = [t if t and t.strip() else " " for t in texts]
+        
         for attempt in range(1, max_retries + 1):
             try:
-                response = self.client.embeddings.create(
-                    model=self.model,
-                    input=texts,
-                    dimensions=self.dimensions,
-                )
+                kwargs = {"model": self.model, "input": safe_texts}
+                if self.dimensions and "embedding-3" in self.model:
+                    kwargs["dimensions"] = self.dimensions
+                    
+                response = self.client.embeddings.create(**kwargs)
                 return [item.embedding for item in response.data]
             except Exception as e:
                 if attempt == max_retries:
