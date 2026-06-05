@@ -232,10 +232,17 @@ class Retriever:
             return []
 
         results = self.collection.get(ids=chunk_ids, include=["documents", "metadatas"])
+        
+        doc_map = {}
+        for doc_id, doc, meta in zip(results["ids"], results["documents"], results["metadatas"]):
+            doc_map[doc_id] = {"doc": doc, "meta": meta}
+
         output: list[dict] = []
-        for rank, (doc_id, doc, meta) in enumerate(
-            zip(results["ids"], results["documents"], results["metadatas"])
-        ):
+        for rank, doc_id in enumerate(chunk_ids):
+            if doc_id not in doc_map:
+                continue
+            doc = doc_map[doc_id]["doc"]
+            meta = doc_map[doc_id]["meta"]
             if doc is None:
                 continue
             score = config.KG_SCORE_BASE + (max(top_k - rank, 0) / max(top_k, 1)) * 0.1

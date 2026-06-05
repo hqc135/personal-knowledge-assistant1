@@ -164,7 +164,13 @@ class KGRetriever:
 
         counter: Counter[str] = Counter()
         for entity in entities:
+            # Check out-edges (where entity is head)
             for _, _, data in self._graph.edges(entity, data=True):
+                chunk_id = data.get("chunk_id")
+                if chunk_id:
+                    counter[chunk_id] += 1
+            # Check in-edges (where entity is tail)
+            for _, _, data in self._graph.in_edges(entity, data=True):
                 chunk_id = data.get("chunk_id")
                 if chunk_id:
                     counter[chunk_id] += 1
