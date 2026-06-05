@@ -78,7 +78,7 @@ class TestSentenceSplit:
         c = self._chunker()
         # 孤立的单字符不应出现在结果中
         sents = c._sentence_split("正常句子。！\n\n下一段的正常内容。")
-        assert all(len(s) >= 5 for s in sents)
+        assert all(len(s["text"]) >= 5 for s in sents)
 
     def test_empty_text(self):
         c = self._chunker()
@@ -186,7 +186,7 @@ class TestSplitText:
         text = "这是一段很短的文字。"  # 只有 1 句，< 3 句
         chunks = chunker.split_text(text)
         assert len(chunks) == 1
-        assert "短的文字" in chunks[0]
+        assert "短的文字" in chunks[0]["text"]
 
     def test_empty_text_returns_empty(self):
         vecs = np.eye(4, dtype=np.float32)
@@ -198,7 +198,7 @@ class TestSplitText:
         chunker = self._make_topic_switch_chunker()
         text = "正常句子在这里，包含了一些实质性的内容。另一个句子继续讨论同样的主题！现在换一个完全不同的话题来讨论。"
         chunks = chunker.split_text(text)
-        assert all(isinstance(c, str) and c.strip() for c in chunks)
+        assert all(isinstance(c, dict) and c["text"].strip() for c in chunks)
 
     def test_no_sentence_truncation(self):
         """验证：每个 chunk 内不应出现跨句截断（内容完整性）"""
@@ -206,9 +206,20 @@ class TestSplitText:
         text = "话题A的第一句完整内容。话题A的第二句完整内容！话题B的完整句子出现在这里。"
         chunks = chunker.split_text(text)
         # 合并后的全文应包含原始所有内容
-        joined = " ".join(chunks)
+        joined = " ".join([c["text"] for c in chunks])
         for fragment in ["第一句", "第二句", "话题B"]:
             assert fragment in joined
+
+    def test_code_block_shielding(self):
+        """验证代码块屏蔽逻辑：代码块不会被拆分，保持原子性。"""
+        chunker = self._make_topic_switch_chunker()
+        text = "这是自然语言。\n```python\nprint('hello')\nprint('world')\n```\n结束语。"
+        sents = chunker._sentence_split(text)
+        # 应该有一个 is_code=True 的 sentence
+        code_sents = [s for s in sents if s["is_code"]]
+        assert len(code_sents) == 1
+        assert "python" in code_sents[0]["code_language"]
+        assert "print('hello')" in code_sents[0]["text"]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -221,7 +232,7 @@ class TestChunkSizeBounds:
         vecs = np.eye(4, dtype=np.float32)
         # min_size=100 强制所有短句合并
         chunker = _make_chunker(vecs, min_size=100, max_size=9999)
-        small_sents = [["短句A"], ["短句B"], ["短句C"]]
+        small_sents = [[{"text": "短句A", "is_code": False}], [{"text": "短句B", "is_code": False}], [{"text": "短句C", "is_code": False}]]
         merged = chunker._merge_small(small_sents)
         # 三个短片段应合并为 1 组
         assert len(merged) == 1
@@ -232,22 +243,22 @@ class TestChunkSizeBounds:
         chunker = _make_chunker(vecs, max_size=20)
         # 每段 10 字，合起来 40 字 > max_size=20
         oversized = [
-            "AAAAAAAAAAAAAAAAAAAAA",  # 21 字
-            "BBBBBBBBBBBBBBBBBBBBB",  # 21 字
+            {"text": "AAAAAAAAAAAAAAAAAAAAA", "is_code": False, "code_language": None},  # 21 字
+            {"text": "BBBBBBBBBBBBBBBBBBBBB", "is_code": False, "code_language": None},  # 21 字
         ]
         result = chunker._split_oversized(oversized)
         assert len(result) >= 2
-        assert all(len(r) <= 20 for r in result)
+        assert all(len(r["text"]) <= 20 for r in result)
 
     def test_single_overlong_sentence_hard_cut(self):
         """单个超长句无法二分时，应按字符截断。"""
         vecs = np.eye(4, dtype=np.float32)
         chunker = _make_chunker(vecs, max_size=10)
-        long_sent = ["A" * 35]
+        long_sent = [{"text": "A" * 35, "is_code": False, "code_language": None}]
         result = chunker._split_oversized(long_sent)
-        assert all(len(r) <= 10 for r in result)
+        assert all(len(r["text"]) <= 10 for r in result)
         # 内容不丢失
-        assert "".join(result) == "A" * 35
+        assert "".join([r["text"] for r in result]) == "A" * 35
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -276,3 +287,4 @@ class TestEmbedderFallback:
         # 不应抛出异常；返回内容包含原文信息
         assert isinstance(result, list)
         assert len(result) >= 1
+        assert isinstance(result[0], dict)

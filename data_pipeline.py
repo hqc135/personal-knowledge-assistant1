@@ -61,14 +61,13 @@ class SemanticChunker:
 
     # ── 公共入口 ──────────────────────────────────────────────────────────────
 
-    def split_text(self, text: str) -> list[str]:
-        """将一段文本切分为语义连贯的 chunk 列表。"""
+    def split_text(self, text: str) -> list[dict]:
+        """将一段文本切分为语义连贯的 chunk 列表，返回带元数据的字典列表。"""
         sentences = self._sentence_split(text)
 
         if len(sentences) < 3:
             # 文档过短，无需相似度计算
-            chunk = text.strip()
-            return [chunk] if chunk else []
+            return self._build_single_chunk(sentences)
 
         try:
             vecs = self._windowed_embed(sentences)
@@ -80,30 +79,51 @@ class SemanticChunker:
             logger.warning(
                 "SemanticChunker 内部异常，跳过语义计算直接返回原文: %s", exc
             )
-            # 轻量降级：直接把拼接后的全文作为单个 chunk 返回
-            # （外层 DocumentProcessor 还有 fallback splitter 作第二重保障）
-            return [text.strip()] if text.strip() else []
+            return self._build_single_chunk(sentences)
+
+    def _build_single_chunk(self, sentences: list[dict]) -> list[dict]:
+        if not sentences:
+            return []
+        text = " ".join([s["text"] for s in sentences]).strip()
+        if not text:
+            return []
+        is_code = all(s["is_code"] for s in sentences)
+        lang = sentences[0]["code_language"] if is_code and sentences else None
+        return [{"text": text, "is_code": is_code, "code_language": lang}]
 
     # ── 句子拆分 ──────────────────────────────────────────────────────────────
 
-    def _sentence_split(self, text: str) -> list[str]:
-        """按标点 / 段落边界拆分，过滤过短噪声片段。"""
-        parts = _SENT_SPLIT_RE.split(text)
+    def _sentence_split(self, text: str) -> list[dict]:
+        """按标点 / 段落边界拆分，使用交替隔离块技术保护 Markdown 代码片段作为原子。"""
+        import re
+        code_block_pattern = re.compile(r"(```[a-zA-Z0-9+#\-\.]*\n[\s\S]*?```)", re.MULTILINE)
+        parts = code_block_pattern.split(text)
         sentences = []
+        
         for part in parts:
-            part = part.strip()
-            if len(part) >= 5:  # 过滤孤立标点、空白等噪声
-                sentences.append(part)
+            if part.startswith("```") and part.endswith("```"):
+                lines = part.split("\n", 1)
+                lang = ""
+                if len(lines) > 1:
+                    lang = lines[0][3:].strip()
+                sentences.append({"text": part, "is_code": True, "code_language": lang})
+            else:
+                sub_parts = _SENT_SPLIT_RE.split(part)
+                for sp in sub_parts:
+                    sp = sp.strip()
+                    if len(sp) >= 5:
+                        sentences.append({"text": sp, "is_code": False, "code_language": None})
         return sentences
 
     # ── 向量计算 ──────────────────────────────────────────────────────────────
 
-    def _windowed_embed(self, sentences: list[str]) -> np.ndarray:
+    def _windowed_embed(self, sentences: list[dict]) -> np.ndarray:
         """
         批量 Embed 所有句子，再做滑动窗口平均平滑。
         返回归一化后的向量矩阵 (N, D)。
         """
-        vecs = self.embedder.encode(sentences, normalize_embeddings=True)  # (N, D)
+        texts = [s["text"] for s in sentences]
+        vecs = self.embedder.encode(texts, normalize_embeddings=True)  # (N, D)
         half = self.window // 2
         smoothed = []
         for i in range(len(vecs)):
@@ -137,21 +157,27 @@ class SemanticChunker:
     # ── chunk 组装 ────────────────────────────────────────────────────────────
 
     def _build_chunks(
-        self, sentences: list[str], breakpoints: list[int]
-    ) -> list[str]:
+        self, sentences: list[dict], breakpoints: list[int]
+    ) -> list[dict]:
         """
         按断点将句子列表合并为 chunk，再执行：
           - 过小合并（< min_size）
           - 过大拆分（> max_size）
         """
         bp_set = set(breakpoints)
-        raw_chunks: list[list[str]] = []
-        current: list[str] = []
+        raw_chunks: list[list[dict]] = []
+        current: list[dict] = []
 
         for i, sent in enumerate(sentences):
             current.append(sent)
-            # 断点在 i 处 → 在 sentence[i] 和 sentence[i+1] 之间切
-            if i in bp_set and i < len(sentences) - 1:
+            
+            # 断点在 i 处，或者前后 is_code 状态发生变化时，强制切断
+            force_cut = False
+            if i < len(sentences) - 1:
+                if sent["is_code"] != sentences[i+1]["is_code"]:
+                    force_cut = True
+                    
+            if (i in bp_set or force_cut) and i < len(sentences) - 1:
                 raw_chunks.append(current)
                 current = []
         if current:
@@ -160,50 +186,69 @@ class SemanticChunker:
         # 合并过小碎片
         merged = self._merge_small(raw_chunks)
         # 拆分过大单体
-        result: list[str] = []
+        result: list[dict] = []
         for chunk_sents in merged:
-            text = " ".join(chunk_sents)
+            text = " ".join([s["text"] for s in chunk_sents])
             if len(text) > self.max_size:
                 result.extend(self._split_oversized(chunk_sents))
             else:
                 if text.strip():
-                    result.append(text.strip())
+                    is_code = all(s["is_code"] for s in chunk_sents)
+                    lang = chunk_sents[0]["code_language"] if is_code and chunk_sents else None
+                    result.append({"text": text.strip(), "is_code": is_code, "code_language": lang})
         return result
 
-    def _merge_small(self, chunks: list[list[str]]) -> list[list[str]]:
-        """将字符数不足 min_size 的 chunk 向前合并。"""
-        merged: list[list[str]] = []
+    def _merge_small(self, chunks: list[list[dict]]) -> list[list[dict]]:
+        """将字符数不足 min_size 的 chunk 向前合并，但禁止代码块与普通文本混合。"""
+        merged: list[list[dict]] = []
         for sents in chunks:
-            text = " ".join(sents)
-            if merged and len(text) < self.min_size:
+            if not merged:
+                merged.append(list(sents))
+                continue
+                
+            prev_text = " ".join([s["text"] for s in merged[-1]])
+            prev_is_code = all(s["is_code"] for s in merged[-1])
+            curr_is_code = all(s["is_code"] for s in sents)
+            
+            if len(prev_text) < self.min_size and prev_is_code == curr_is_code:
                 merged[-1].extend(sents)
             else:
                 merged.append(list(sents))
         return merged
 
-    def _split_oversized(self, sentences: list[str]) -> list[str]:
+    def _split_oversized(self, sentences: list[dict]) -> list[dict]:
         """
         对超过 max_size 的 chunk 按句子列表二分递归拆分。
         最小粒度为单句（不再下钻），防止无限递归。
+        针对代码块实施原子物理保护，拒绝裁切。
         """
         if len(sentences) <= 1:
-            # 单句超长：直接按字符截断（硬切保底）
-            text = sentences[0] if sentences else ""
+            sent = sentences[0] if sentences else None
+            if not sent:
+                return []
+            text = sent["text"]
+            # 代码块硬切豁免
+            if sent["is_code"]:
+                return [{"text": text.strip(), "is_code": True, "code_language": sent["code_language"]}]
+            
+            # 自然语言硬切保底
             return [
-                text[i: i + self.max_size]
+                {"text": text[i: i + self.max_size].strip(), "is_code": False, "code_language": None}
                 for i in range(0, len(text), self.max_size)
                 if text[i: i + self.max_size].strip()
             ]
         mid = len(sentences) // 2
         left = sentences[:mid]
         right = sentences[mid:]
-        result: list[str] = []
+        result: list[dict] = []
         for half in (left, right):
-            text = " ".join(half)
+            text = " ".join([s["text"] for s in half])
             if len(text) > self.max_size:
                 result.extend(self._split_oversized(half))
             elif text.strip():
-                result.append(text.strip())
+                is_code = all(s["is_code"] for s in half)
+                lang = half[0]["code_language"] if is_code and half else None
+                result.append({"text": text.strip(), "is_code": is_code, "code_language": lang})
         return result
 
 
@@ -262,7 +307,7 @@ class DocumentProcessor:
             separators=["\n## ", "\n### ", "\n\n", "\n", "。", ""],
         )
 
-    def _split_document(self, text: str, source: str) -> tuple[list[str], str]:
+    def _split_document(self, text: str, source: str) -> tuple[list[dict], str]:
         """
         对单篇文档执行分块，返回 (chunks, chunker_name)。
         优先语义分块，失败时自动降级至字符切块。
@@ -280,7 +325,8 @@ class DocumentProcessor:
                 )
 
         # fallback
-        return self._fallback_splitter.split_text(text), "recursive"
+        fallback_chunks = self._fallback_splitter.split_text(text)
+        return [{"text": c, "is_code": False, "code_language": None} for c in fallback_chunks], "recursive"
 
     @staticmethod
     def _file_hash(path: Path) -> str:
@@ -386,15 +432,21 @@ class DocumentProcessor:
                 continue
 
             chunks, chunker_name = self._split_document(text, str(relative))
-            for i, chunk in enumerate(chunks):
+            for i, chunk_dict in enumerate(chunks):
+                meta = {
+                    "source": str(relative),
+                    "chunk_index": i,
+                    "chunker": chunker_name,   # 记录实际使用的分块器
+                }
+                if chunk_dict.get("is_code"):
+                    meta["is_code"] = True
+                    if chunk_dict.get("code_language"):
+                        meta["code_language"] = chunk_dict["code_language"]
+                
                 docs.append({
                     "id": self._make_chunk_id(relative, i),
-                    "text": chunk,
-                    "metadata": {
-                        "source": str(relative),
-                        "chunk_index": i,
-                        "chunker": chunker_name,   # 记录实际使用的分块器
-                    }
+                    "text": chunk_dict["text"],
+                    "metadata": meta
                 })
 
         if skipped:
@@ -511,6 +563,8 @@ class DocumentProcessor:
         all_triples: list[dict] = []
 
         def _extract_one(doc: dict) -> list[dict]:
+            if doc.get("metadata", {}).get("is_code"):
+                return []
             return extract_triples(
                 doc["text"],
                 source=doc["metadata"]["source"],

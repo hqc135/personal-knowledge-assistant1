@@ -200,33 +200,57 @@ class ParentChildChunker:
             parent_id = _make_parent_id(relative_path, p_idx)
 
             # ── 第二层：Child 切分 ──
-            child_texts = self._split_children(parent_text, source)
+            child_dicts = self._split_children(parent_text, source)
             child_ids: list[str] = []
 
-            for c_idx, child_text in enumerate(child_texts):
+            for c_idx, child_dict in enumerate(child_dicts):
                 child_id = _make_child_id(relative_path, p_idx, c_idx)
                 child_ids.append(child_id)
+                
+                c_meta = {
+                    "source": source,
+                    "parent_id": parent_id,
+                    "parent_index": p_idx,
+                    "child_index": c_idx,
+                    "chunk_type": "child",
+                }
+                if child_dict.get("is_code"):
+                    c_meta["is_code"] = True
+                    if child_dict.get("code_language"):
+                        c_meta["code_language"] = child_dict["code_language"]
+
                 child_docs.append({
                     "id": child_id,
-                    "text": child_text,
-                    "metadata": {
-                        "source": source,
-                        "parent_id": parent_id,
-                        "parent_index": p_idx,
-                        "child_index": c_idx,
-                        "chunk_type": "child",
-                    },
+                    "text": child_dict["text"],
+                    "metadata": c_meta,
                 })
+
+            is_parent_code = False
+            parent_code_lang = None
+            parent_text_stripped = parent_text.strip()
+            if parent_text_stripped.startswith("```") and parent_text_stripped.endswith("```"):
+                parts = parent_text_stripped.split("```")
+                if len(parts) == 3 and not parts[0] and not parts[2]:
+                    is_parent_code = True
+                    lines = parent_text_stripped.split("\n", 1)
+                    if len(lines) > 1:
+                        parent_code_lang = lines[0][3:].strip()
+
+            p_meta = {
+                "source": source,
+                "parent_index": p_idx,
+                "child_count": len(child_ids),
+                "chunk_type": "parent",
+            }
+            if is_parent_code:
+                p_meta["is_code"] = True
+                if parent_code_lang:
+                    p_meta["code_language"] = parent_code_lang
 
             parent_docs.append({
                 "id": parent_id,
                 "text": parent_text,
-                "metadata": {
-                    "source": source,
-                    "parent_index": p_idx,
-                    "child_count": len(child_ids),
-                    "chunk_type": "parent",
-                },
+                "metadata": p_meta,
             })
 
         logger.info(
@@ -239,7 +263,7 @@ class ParentChildChunker:
 
     # ── 内部方法 ──────────────────────────────────────────────────────────────
 
-    def _split_children(self, parent_text: str, source: str) -> list[str]:
+    def _split_children(self, parent_text: str, source: str) -> list[dict]:
         """
         对单个 parent chunk 执行 child 级别细粒度切分。
         优先使用 SemanticChunker，失败时降级至 RecursiveCharacterTextSplitter。
@@ -257,4 +281,5 @@ class ParentChildChunker:
                     "SemanticChunker 异常，降级至字符切块 [%s]: %s", source, exc
                 )
 
-        return self._fallback_splitter.split_text(parent_text)
+        fallback_chunks = self._fallback_splitter.split_text(parent_text)
+        return [{"text": c, "is_code": False, "code_language": None} for c in fallback_chunks]
